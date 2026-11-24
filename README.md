@@ -7,3 +7,5 @@ asks a person when a rule says so.
 
 In development: nothing here is ready to run. [docs/design.md](docs/design.md) is
 the design, and `docs/drivers/` is what was measured for each product.
+
+[docs/live.md](docs/live.md) is the first live run, with real Claude Code sessions, and `scripts/live.ts` repeats it.

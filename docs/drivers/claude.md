@@ -45,4 +45,16 @@ false`, and a message to a busy session waits for the end of its current turn.
 The test turn was short (the model quoted the request instead of reciting the
 alphabet), so how the queue behaves over a long turn is not measured.
 
+**Observed, `claude -p` sessions (2026-11-24, [docs/live.md](../live.md)):** a
+session started with `--input-format stream-json` writes its record and creates
+its socket at start, before any prompt, with `status: idle` and `peerProtocol`
+1, so the adapter lists it at once. A pushed message wakes it: a turn starts
+and shows in the output stream as an
+`init`, the model's events and a `result`, but the message itself is not echoed
+as a `user` event. It is in the session's transcript, which records an `enqueue`
+and then a `user` entry that begins "Another Claude session sent a message:"
+followed by the gateway's envelope. Both sessions took messages without any
+setting changed, so the default for `crossSessionInbound` accepts. Eleven
+messages were delivered this way and every one started a turn.
+
 Not measured yet: a session whose setting is `hold`.
