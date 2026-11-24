@@ -1,0 +1,12 @@
+.git
+.gitignore
+.dockerignore
+node_modules
+dist
+docs
+test
+scripts
+*.sqlite*
+Dockerfile
+*.md
+!package.json
