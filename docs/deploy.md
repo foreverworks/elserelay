@@ -208,27 +208,20 @@ reaches them through that user's files and sockets.
 ### Claude Code under systemd
 
 Claude Code opens each session's inbox as a Unix socket under `/tmp`
-(`/tmp/cc-socks/<pid>.sock`). A service with `PrivateTmp=yes` has its own empty
-`/tmp`, so an adapter in another service cannot see the sockets of the service
-that runs the sessions. Either run the adapter in the same service as the
-sessions, or make its unit join that service's mount namespace with
-`JoinsNamespaceOf=`. That setting only works when both units have
-`PrivateTmp=yes`.
+(`/tmp/cc-socks/<pid>.sock`). A service with `PrivateTmp=yes` has its own `/tmp`,
+and the adapter reaches its sessions' sockets through `/proc/<pid>/root`, which needs
+the same user and nothing else. One adapter serves all of a user's services, so its
+unit needs no setting for it.
 
 ```ini
 # /etc/systemd/system/elserelay-adapter.service
 [Unit]
 Description=elserelay adapter for Claude Code
-After=network-online.target claude-sessions.service
+After=network-online.target
 Wants=network-online.target
-# Share the private /tmp of the service that runs the Claude Code sessions.
-# JoinsNamespaceOf= only takes effect for a unit that is also ordered after that
-# service, so the After= above names it too.
-JoinsNamespaceOf=claude-sessions.service
 
 [Service]
 User=agent
-PrivateTmp=yes
 LoadCredential=token:/etc/elserelay/token-build-box
 StateDirectory=elserelay-adapter
 Environment=ELSERELAY_URL=http://gateway.internal.example:7411
@@ -243,10 +236,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-`claude-sessions.service` stands for whatever unit runs your sessions, and it
-must set `PrivateTmp=yes` too. The adapter then starts after that service and
-stops before it. If your sessions do not use a private `/tmp`,
-remove both lines. The adapter logs `connected` when its stream to the broker
+The adapter logs `connected` when its stream to the broker
 is open and `serving` with the sessions it reads when it starts.
 
 ## The approver

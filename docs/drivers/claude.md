@@ -24,10 +24,13 @@ for the test.
   event's metadata and is **not** shown to the model, so a sender's name has to be
   in the text. The gateway's own header has to say that the text is data.
 - The receiver records the sending process's pid, which it verified.
-- The session's file system has to be shared: a service with a private `/tmp`
-  hides its sessions' sockets from a process in another service, though the
-  records stay visible. The adapter has to run in the same mount namespace
-  (systemd: `JoinsNamespaceOf=`).
+- A service with a private `/tmp` (systemd, `PrivateTmp=yes`) hides its sessions'
+  sockets from a process in another service, though the records stay visible. The
+  driver therefore opens the socket as the session's own process sees it,
+  `/proc/<pid>/root<path>`, and falls back to the path itself. **Observed:** a process
+  of the same user in another private `/tmp` reaches the sockets this way, with no
+  privilege. One adapter serves every service of one user, and a service hardened
+  against it (`ProtectProc=`, another pid namespace) is not covered.
 
 Documented, not measured: `crossSessionInbound` (`accept`, `hold`, `refuse`)
 decides what a session does with a message; a held one expires after five minutes

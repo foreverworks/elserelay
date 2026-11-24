@@ -22,13 +22,14 @@ export const USAGE = `usage: elserelay <command> [--config <file>]
 
   adapter            run the adapter beside an agent (settings from the environment)
   hook antigravity   the Antigravity hook: reads its JSON on stdin, prints what waits
+  hook claude|codex  the identity hook: fills the session of a call to these tools
   health [url]       exit 0 when the broker's /healthz answers, 1 if not (a healthcheck
                      without curl; the url may be ELSERELAY_HEALTH_URL)
   approver elsewire  an approver command for the broker: reads a request on stdin,
                      asks a person through an Elsewire server, prints the answer
 
-The config file is --config, or the ELSERELAY_CONFIG variable. The last four
-commands take no config file.`;
+The config file is --config, or the ELSERELAY_CONFIG variable. The commands
+under the empty line take no config file.`;
 
 const place = (a: Address): string => escapeForTerminal(`${a.container}/${a.session}`).replace(/\n/g, " ");
 

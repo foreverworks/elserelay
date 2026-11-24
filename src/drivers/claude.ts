@@ -118,8 +118,25 @@ async function readRecord(env: ClaudeEnv, file: string): Promise<SessionRecord |
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * Where a session's socket may be, best first: as the session's own process sees
+ * it, which is the only right answer when that process has another `/tmp` (a
+ * systemd service with `PrivateTmp=yes`), then as this process sees it, where
+ * there is no `/proc`.
+ */
+const socketPaths = (r: SessionRecord): readonly string[] =>
+  r.messagingSocketPath.startsWith("/") ? [`/proc/${r.pid}/root${r.messagingSocketPath}`, r.messagingSocketPath] : [r.messagingSocketPath];
+
+async function socketOf(env: ClaudeEnv, r: SessionRecord): Promise<string | null> {
+  for (const path of socketPaths(r)) if (await env.isSocket(path)) return path;
+  return null;
+}
+
+/** A live session with the path its socket is reached by. */
+type Live = SessionRecord & { readonly socket: string };
+
 /** Live sessions: a record that parses, a process that runs and a socket that exists. */
-async function liveRecords(env: ClaudeEnv): Promise<readonly SessionRecord[]> {
+async function liveRecords(env: ClaudeEnv): Promise<readonly Live[]> {
   let names: readonly string[];
   try {
     names = await env.readDir(env.dir);
@@ -127,9 +144,11 @@ async function liveRecords(env: ClaudeEnv): Promise<readonly SessionRecord[]> {
     return [];
   }
   const records = await Promise.all(names.filter((n) => n.endsWith(".json")).map((n) => readRecord(env, n)));
-  const found: SessionRecord[] = [];
+  const found: Live[] = [];
   for (const r of records) {
-    if (r && env.pidAlive(r.pid) && (await env.isSocket(r.messagingSocketPath))) found.push(r);
+    if (!r || !env.pidAlive(r.pid)) continue;
+    const socket = await socketOf(env, r);
+    if (socket !== null) found.push({ ...r, socket });
   }
   return found;
 }
@@ -143,7 +162,7 @@ function activity(r: SessionRecord, now: number): Seen["activity"] {
 const seen = (r: SessionRecord, now: number): Seen => ({ session: r.sessionId, title: r.name ?? null, activity: activity(r, now) });
 
 export function createClaudeDriver(env: ClaudeEnv = nodeClaudeEnv()): Driver {
-  const find = async (session: string): Promise<SessionRecord | null> =>
+  const find = async (session: string): Promise<Live | null> =>
     (await liveRecords(env)).find((r) => r.sessionId === session) ?? null;
 
   return {
@@ -165,7 +184,7 @@ export function createClaudeDriver(env: ClaudeEnv = nodeClaudeEnv()): Driver {
         };
       }
       const line = `${JSON.stringify({ type: "user", message: { role: "user", content: text }, from: FROM })}\n`;
-      const sent = await env.send(r.messagingSocketPath, line);
+      const sent = await env.send(r.socket, line);
       return sent.ok ? { ok: true, certainty: "accepted" } : { ok: false, retry: sent.retry, detail: sent.detail };
     },
   };

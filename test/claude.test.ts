@@ -86,6 +86,28 @@ beforeEach(async () => {
   r = await rig();
 });
 
+describe("claude driver: a session with another /tmp", () => {
+  it("is reached through its own process's view of the file system, before ours", async () => {
+    const sent: string[] = [];
+    await r.record(9, { messagingSocketPath: "/tmp/cc-socks/9.sock" });
+    const env: ClaudeEnv = {
+      ...r.env,
+      isSocket: async (p) => p === "/proc/9/root/tmp/cc-socks/9.sock" || p === "/tmp/cc-socks/9.sock",
+      send: async (p) => (sent.push(p), { ok: true }),
+    };
+    expect((await createClaudeDriver(env).deliver("sess-9", "hi")).ok).toBe(true);
+    expect(sent).toEqual(["/proc/9/root/tmp/cc-socks/9.sock"]);
+  });
+
+  it("is reached at the recorded path where there is no /proc, and a relative path never goes under /proc", async () => {
+    const asked: string[] = [];
+    await r.record(8, { messagingSocketPath: "socks/8.sock" });
+    const env: ClaudeEnv = { ...r.env, isSocket: async (p) => (asked.push(p), p === "socks/8.sock") };
+    expect(await createClaudeDriver(env).list()).toHaveLength(1);
+    expect(asked).toEqual(["socks/8.sock"]);
+  });
+});
+
 describe("claude driver: list", () => {
   it("lists a live session with its id, title and activity", async () => {
     await r.listen("10.sock");

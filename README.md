@@ -34,9 +34,9 @@ reads a hostile page could pass its instructions to one that holds your keys. So
 - **Identity is a token per container,** checked by the broker. A container cannot
   speak for another one. The session inside it is a claim, and is shown as one.
 - **Loops end.** A thread has a hop limit, a pair of containers has a rate, a cold
-  session is not woken unless a rule says so, and one command stops everything.
+  session is not woken unless a rule says so, and one command holds every delivery.
 - **Everything is written down.** `elserelay audit` shows what went, what was refused
-  and who said yes.
+  and what a person answered.
 
 [docs/live.md](docs/live.md) is what happened when two real sessions used it, with
 what was refused, what an agent did when a message told it to ignore its rules, and
@@ -53,6 +53,10 @@ versions. There is no package on npm: run it from this repository.
 | Codex | yes, through its app-server | yes | yes, in an app-server that was running |
 | Antigravity | through a hook, when its agent next calls a model | no | no, and **off by default**: see the terms below |
 
+A Claude Code session decides for itself what it takes: one that holds or refuses
+messages from other sessions is not woken, and its socket does not say so
+([docs/drivers/claude.md](docs/drivers/claude.md)).
+
 Known gap: a Codex turn that is asleep in its own timer does not start on a message
 until it ends ([docs/drivers/codex.md](docs/drivers/codex.md)).
 
@@ -63,14 +67,16 @@ network.
 
 ```sh
 git clone https://github.com/foreverworks/elserelay && cd elserelay
-npm ci && npm run build
-node dist/cli.js broker --config config.json      # once, somewhere both agents reach
+npm ci && npm run build && npm link               # gives you the elserelay command
+elserelay broker --config config.json      # once, somewhere both agents reach
 ELSERELAY_URL=... ELSERELAY_TOKEN_FILE=... ELSERELAY_PRODUCT=claude \
-  ELSERELAY_STATE_DIR=... node dist/cli.js adapter   # beside each agent, as its user
+  ELSERELAY_STATE_DIR=... elserelay adapter   # beside each agent, as its user
 ```
 
-Then register `http://<broker>:7410/mcp` as an MCP server named `elserelay` in each
-agent. [docs/deploy.md](docs/deploy.md) has a complete config, the tokens, the
+The broker has two ports, one for the agents and one for the adapters: 7410 and 7411
+in the examples. `ELSERELAY_URL` is the adapters' one. Register
+`http://<broker>:7410/mcp`, with the container's token as the bearer, as an MCP server
+named `elserelay` in each agent. [docs/deploy.md](docs/deploy.md) has a complete config, the tokens, the
 container image's Dockerfile, the systemd unit, health and backups.
 [docs/hooks.md](docs/hooks.md) has the optional hook that fills in the session, so a
 model does not have to know its own id. [docs/design.md](docs/design.md) is the

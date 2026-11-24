@@ -20,7 +20,7 @@ jobs:
   publish:
     # A pull request, a fork or another branch never gets past this.
     if: >-
-      github.event.repository.visibility == 'public' && (
+      github.event.repository.private == false && (
         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
         (github.event_name == 'workflow_run' &&
          github.event.workflow_run.conclusion == 'success' &&
@@ -59,7 +59,7 @@ jobs:
         run: |
           mkdir -p data/tokens
           head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > data/tokens/token-probe
-          printf '%s' '{"store":"/data/b.sqlite","tokensDir":"/data/tokens","listen":{"host":"0.0.0.0","mcpPort":7410,"adapterPort":7411},"containers":{"probe":{"product":"fake"}}}' > data/config.json
+          printf '%s' '{"store":"/data/b.sqlite","tokensDir":"/data/tokens","listen":{"host":"0.0.0.0","allowedHosts":["probe.invalid"],"mcpPort":7410,"adapterPort":7411},"containers":{"probe":{"product":"fake"}}}' > data/config.json
           sudo chown -R 10001:10001 data
           docker run -d --name check --init --read-only --cap-drop ALL -v "$PWD/data:/data" elserelay-check
           for _ in $(seq 15); do
