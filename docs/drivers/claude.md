@@ -36,4 +36,13 @@ by default ([docs](https://code.claude.com/docs/en/cross-session-messaging)).
 Not documented by the vendor: the message line's shape. It can change in any
 release, so the contract test runs against each new one.
 
-Not measured yet: a busy session, and a session whose setting is `hold`.
+**Observed, busy session:** a message that arrives while a turn is running is not
+lost and does not join that turn. The session's transcript records it as an
+`enqueue` the moment it arrived (within 30 ms of the second line, which was written 1 s
+after the first) and as a `dequeue` when the running turn had ended, 5.4 s
+later, when it started a turn of its own. So the driver reports `joinsTurn:
+false`, and a message to a busy session waits for the end of its current turn.
+The test turn was short (the model quoted the request instead of reciting the
+alphabet), so how the queue behaves over a long turn is not measured.
+
+Not measured yet: a session whose setting is `hold`.
