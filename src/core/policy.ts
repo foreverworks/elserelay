@@ -17,6 +17,10 @@ const rule = z.strictObject({
 
 const count = z.number().int().min(1);
 
+/** The longest wait a timer is given: a longer one would pass what a timer can hold (about 24.8 days) and fire at once. */
+export const MAX_DURATION_MS = 7 * 86_400_000;
+const duration = z.number().int().min(1).max(MAX_DURATION_MS, { error: "must be at most 7 days (604800000 ms)" });
+
 // `prefault` feeds the empty object through the field defaults, so a file may leave out any part of `limits`.
 const limits = z
   .strictObject({
@@ -26,7 +30,7 @@ const limits = z
       .prefault({}),
     maxBodyChars: count.default(16_000),
     messageTtlMs: count.default(86_400_000),
-    approvalTtlMs: count.default(900_000),
+    approvalTtlMs: duration.default(900_000),
     maxAttempts: count.default(5),
     refusals: z
       .strictObject({ messages: count.default(60), windowMs: count.default(3_600_000) })

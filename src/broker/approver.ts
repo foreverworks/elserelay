@@ -1,3 +1,4 @@
+import { claimedTitle } from "../core/render.js";
 import type { ApprovalRequest } from "./service.js";
 
 /**
@@ -38,6 +39,7 @@ export function promptText(request: ApprovalRequest): string {
   return [
     `Message ${request.id} is waiting for you`,
     `  from: ${who(request.from)}`,
+    `  session title: ${escapeForTerminal(claimedTitle(request)).replace(/\n/g, " ")} (claimed by the sender, not verified; it is delivered with the text)`,
     `  to:   ${who(request.to)}`,
     `  asked by: ${request.rule === null ? "the default" : escapeForTerminal(`rule "${request.rule}"`).replace(/\n/g, " ")}`,
     `  answer by: ${isoTime(request.decideBy)}`,

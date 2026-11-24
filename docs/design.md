@@ -256,8 +256,23 @@ are the sender's claim, and `body` is untrusted: show it
 to a person escaped, as `agent-gateway approvals` does (`escapeForTerminal` in
 `src/broker/approver.ts`), never as markup or as something to run.
 
+What a yes delivers is not the body alone: the receiving session is handed the
+gateway's own header (the sender's container, product, claimed session title and
+id, the thread, the hop and the message id) and then the body in a fence. The
+header is built by `render` in `src/core/render.ts` from exactly the fields of
+this request, and it never changes after the message is sent (the title is the
+one the sender claimed when it sent the message, kept with the message, not read
+again from the peer's report). An approver that wants a person to approve what is
+delivered should show that text, as `agent-gateway approvals` does with the
+title and the elsewire command does with the whole text.
+
 The program answers with exactly one JSON value on standard output and exit
-status 0: `{"answer":"approve"}` or `{"answer":"refuse"}`. Everything else is
+status 0: `{"answer":"approve"}` or `{"answer":"refuse"}`. A refusal may carry a
+reason code, `{"answer":"refuse","reason":"too-long"}`, so that the sender is told
+the true reason instead of the words for a person's no. The only code there is
+is `too-long` (the message is more than a person can be asked to read, which
+the sender reads as "too long for a person to approve"); a `reason` with any other
+value, or on an approve, makes the whole output no answer. Everything else is
 **no answer**: a non-zero status, no output, output that is not that object,
 more than 64 KiB of output, a program that cannot start. No answer is never
 taken as a yes. The broker logs that there was none (the reason in a few words,
@@ -270,17 +285,32 @@ What the program prints to standard error goes into the broker's log, one line
 at a time, cleaned of control characters and cut at 500 characters. It must not
 print the message there.
 
-The broker ends the program, SIGTERM first and SIGKILL after 5 seconds, always
-to the PID it started, when
+The broker starts the program as the leader of a process group of its own and
+ends it with a signal to that group while the program itself is still running
+(never to a group whose leader has already ended), with SIGKILL after 5
+seconds if it is still there. The signal says why:
 
-- the message's `decideBy` is reached,
-- the message stops being held (a person answered from the command line, or it
-  was refused or expired), and
-- the broker closes.
+- **SIGTERM, the question is moot**: the message's `decideBy` was reached, or the
+  message stopped being held (a person answered from the command line, or it was
+  refused or expired). A program that has put a question in front of a person
+  should withdraw it.
+- **SIGINT, the broker is closing**: the message is still held and the next
+  broker will run the program again, so a program should leave its question as it
+  is and exit.
+
+The broker does not wait for the program's output pipes to close: once the
+program has ended it reads what arrived in the next second, closes the pipes and
+moves on, so a helper the program left running with the pipe open cannot hold a
+place or the shutdown. A helper left behind after the
+program ended is not signalled: its group's leader is gone, and the group's id may
+mean something else by then.
 
 The broker does not wait for a program that is no longer asked. An answer that
 comes after any of these is dropped, and one that reaches the service late is
-refused there as before. At most 16 programs run at once; the other messages
+refused there as before. A real answer is not dropped for a busy database: when
+the write fails and the message is still held, the broker writes the same answer
+again after 250 ms, 500 ms, 1 s and 2 s, and only then counts it as no answer
+(and runs the program again as above). At most 16 programs run at once; the other messages
 wait for a free place in the order they were held.
 
 The program's environment is `PATH`, `HOME` and `LANG` of the broker's own, the
@@ -306,19 +336,38 @@ bearer authentication, and needs `ELSEWIRE_URL`, `ELSEWIRE_TOKEN_FILE` and
 `ELSEWIRE_STATE_DIR`.
 
 It creates one request with the `review` connector. The person is shown the
-body escaped like a terminal would show it, as the draft, with one reply,
-"Refuse", and approves by sending the draft back as it is. A yes counts only
-when the returned text is the draft, unedited: the gateway never rewrites a
-sender's words, so an edited text is a refusal. A body that is over 4000
-characters once escaped is refused without asking, because a person must be able
-to read all of what they approve.
+text the receiving session will be handed, built by the gateway's own `render`
+from the request (so the sender's claimed session title is in it, in the header,
+above the fence that holds the body), with every control character escaped and
+the whole of it inside a code fence longer than any run of backticks in it, so no
+formatting can hide a part of it. The request has one reply, "Refuse", and
+allows no note (`notes: false`), so a person cannot write "don't send" and still
+send. The person approves by sending the draft back as it is. A yes counts only
+when the returned text is the draft, unedited and without a note: the gateway
+never rewrites a sender's words, so an edited text, or an answer that carries a
+note anyway, is a refusal.
+
+Elsewire limits a draft to 4000 characters, so a text that is longer once
+escaped is refused without asking, with the reason `too-long`: the sender is told
+the message is too long for a person to approve. The header takes about 900
+characters (up to about 1200 with the longest names), so with this approver keep
+`policy.limits.maxBodyChars` under about 2800, or messages near the limit are
+refused for length after a person was never asked.
 
 The id of the Elsewire request is written to a file named after the SHA-256 of
 the message id before the program waits, so a second run for the same message
-waits for the same request. The file is removed after a final answer. A failed
-request or an unreachable server is no answer (exit status 1), and the broker
-tries again. A request that is still open when the message stops being held is
-left to run out on Elsewire's side.
+waits for the same request. The file is removed after a final answer. Before it
+asks, the program checks that its state directory can be written to (it creates
+it, and makes it private to its owner when it is ours), and asks nothing if not;
+if the file cannot be written after the request was made, the request is
+cancelled and there is no answer. At each start it removes state files older than
+7 days and temporary files older than an hour.
+
+On SIGTERM (the question is moot) it cancels the request with `elsewire_cancel`
+and removes its file, so no question is left open on a person's phone for a
+message that no longer waits. On SIGINT (the broker is closing) it leaves both as
+they are, and the next broker run waits for the same request. A failed request or
+an unreachable server is no answer (exit status 1), and the broker tries again.
 
 ## What this does not do
 

@@ -7,7 +7,7 @@ import { cliApprover } from "./approver.js";
 import type { Approver } from "./approver.js";
 import { makeCommandApprover } from "./command.js";
 import type { After, Spawn, Timing } from "./command.js";
-import { listen, makeChannel } from "./channel.js";
+import { HEALTH_STALE_MS, listen, makeChannel } from "./channel.js";
 import type { Every } from "./channel.js";
 import { loadConfig } from "./config.js";
 import type { Config } from "./config.js";
@@ -105,7 +105,10 @@ export async function startBroker(config: Config, effects: Effects): Promise<Run
     if (!config.products.has(label)) log(`the token for "${label}" has no entry in containers, so it is refused everywhere`);
   }
 
-  const channel = makeChannel({ service, tokens, every: effects.every });
+  // When the poll loop last completed a run. Starting counts, so the first poll has a full period to finish.
+  let polledAt = effects.now();
+  const healthy = (): boolean => effects.now() - polledAt <= Math.max(HEALTH_STALE_MS, 3 * config.pollMs);
+  const channel = makeChannel({ service, tokens, every: effects.every, healthy });
   const adapters = await listen(channel, config.listen.host, config.listen.adapterPort);
 
   const mcp = await serve({
@@ -133,6 +136,7 @@ export async function startBroker(config: Config, effects: Effects): Promise<Run
         approver.ask(request).catch((error: unknown) => log(`the approver failed for ${request.id}: ${error instanceof Error ? error.message : "unknown error"}`));
       }
       channel.pumpAll();
+      polledAt = effects.now();
     } catch (error) {
       log(`poll failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }

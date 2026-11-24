@@ -129,7 +129,7 @@ CREATE INDEX messages_pullable ON messages (to_container, to_product, to_session
 
 const reasonSchema: z.ZodType<Reason> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("policy"), rule: z.string().nullable() }),
-  z.strictObject({ kind: z.literal("approver"), answer: z.enum(["no", "timeout"]) }),
+  z.strictObject({ kind: z.literal("approver"), answer: z.enum(["no", "timeout", "too-long"]) }),
   z.strictObject({ kind: z.literal("hops"), limit: z.number(), sendWindowMs: z.number().exactOptional() }),
   z.strictObject({ kind: z.literal("rate"), limit: z.number(), windowMs: z.number() }),
   z.strictObject({ kind: z.literal("stopped") }),

@@ -9,7 +9,7 @@ export function reasonText(reason: Reason): string {
         ? "no policy rule lets you message that session"
         : `the policy rule "${oneLine(reason.rule)}" does not let you message that session`;
     case "approver":
-      return reason.answer === "no" ? "a person refused it" : "no person answered in time";
+      return reason.answer === "no" ? "a person refused it" : reason.answer === "too-long" ? "the message is too long for a person to approve; send a shorter one" : "no person answered in time";
     case "hops":
       return reason.sendWindowMs === undefined
         ? `this thread already has ${reason.limit} replies, the most allowed`

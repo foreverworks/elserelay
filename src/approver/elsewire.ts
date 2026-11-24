@@ -2,33 +2,54 @@
  * `agent-gateway approver elsewire`: a command for the broker's `command`
  * approver. It reads one approval request on stdin, asks a person through an
  * Elsewire server (an MCP server over streamable HTTP with a bearer token), and
- * prints `{"answer":"approve"}` or `{"answer":"refuse"}`.
+ * prints `{"answer":"approve"}` or `{"answer":"refuse"}` (with the reason
+ * `too-long` when the text is more than a person can be asked to read).
  *
- * What the person is shown is the message exactly as the broker would show it on
- * a terminal, and a yes counts only when what comes back is that text, unedited:
- * the gateway never rewrites a sender's words, so an edited text is a refusal.
+ * What the person is shown is the text the receiving session will be handed, as
+ * the gateway's `render` builds it from the request, with every control character
+ * escaped, so the sender's claimed session title and every other line of it are
+ * in front of the person too. A yes counts only when what comes back is that
+ * text, unedited: the gateway never rewrites a sender's words, so an edited text
+ * is a refusal. The request allows no note, and an answer that carries one is a
+ * refusal, so nothing can be said that is not in the text.
+ *
+ * The broker ends the command with SIGTERM when the question is over (the message
+ * was answered elsewhere, reached its deadline or is not held any more): the
+ * request is then cancelled on the server and forgotten. It ends it with SIGINT
+ * when only the broker is going away: the request stays open and its state file
+ * stays, so the next broker run picks it up.
  * Settings come from the environment: ELSEWIRE_URL, ELSEWIRE_TOKEN_FILE and
  * ELSEWIRE_STATE_DIR (or the AGENT_GATEWAY_APPROVER_STATE_DIR the broker sets).
  * Neither the token nor a message body is ever written to stderr.
  */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@foreverworks/mcp-kit";
 import { z } from "zod";
 import { escapeForTerminal } from "../broker/approver.js";
+import type { StopWhy } from "../broker/command.js";
+import { render } from "../core/render.js";
+import { PRODUCTS } from "../core/types.js";
 
 /** A person must be able to read all of what they approve. */
 export const MAX_DRAFT_CHARS = 4000;
 export const AWAIT_SECONDS = 50;
 export const MIN_TIMEOUT_SECONDS = 10;
 export const MAX_TIMEOUT_SECONDS = 86_400;
+/** Elsewire's limit on a title, counted in UTF-16 units like the server counts. */
 export const TITLE_CHARS = 200;
+/** A state file this old belongs to a request that has long ended (a message is held for 7 days at most). */
+export const STATE_MAX_AGE_MS = 7 * 86_400_000;
+/** A temporary file this old was left by a run that died between writing and renaming. */
+export const TMP_MAX_AGE_MS = 3_600_000;
 
 const request = z.object({
   id: z.string().min(1),
   thread: z.string().min(1),
-  from: z.object({ container: z.string(), product: z.string(), session: z.string() }),
+  hop: z.number().int().min(0),
+  from: z.object({ container: z.string(), product: z.enum(PRODUCTS), session: z.string(), title: z.string().nullable() }),
   to: z.object({ container: z.string(), product: z.string(), session: z.string() }),
   body: z.string(),
   decideBy: z.number(),
@@ -38,7 +59,7 @@ export type Request = z.infer<typeof request>;
 const created = z.object({ id: z.string().min(1) });
 const awaited = z.object({
   status: z.enum(["pending", "done", "denied", "failed", "expired", "cancelled"]),
-  answer: z.object({ text: z.string(), edited: z.boolean() }).optional(),
+  answer: z.object({ text: z.string(), edited: z.boolean(), note: z.string().nullish() }).optional(),
 });
 
 const settings = z.object({
@@ -58,6 +79,10 @@ export type StateIo = {
   readonly read: (name: string) => Promise<string | undefined>;
   readonly write: (name: string, content: string) => Promise<void>;
   readonly remove: (name: string) => Promise<void>;
+  /** Makes sure files can be written: creates the folder, keeps it private to its owner, and fails when it cannot be written to. */
+  readonly prepare: () => Promise<void>;
+  /** Removes state files older than a week and stale temporary files; returns how many. Never throws. */
+  readonly sweep: (nowMs: number) => Promise<number>;
 };
 
 export type Effects = {
@@ -68,6 +93,8 @@ export type Effects = {
   readonly connect: (url: string, token: string) => Tools;
   /** The name of the machine the request comes from. */
   readonly host: string;
+  /** Settles with why the command is being stopped: the broker's SIGTERM is `moot`, its SIGINT `shutdown`. Never settles when nothing stops it. */
+  readonly stopped: Promise<StopWhy>;
   readonly now: () => number;
   readonly sleep: (ms: number) => Promise<void>;
   readonly out: (line: string) => void;
@@ -76,22 +103,28 @@ export type Effects = {
 
 const oneLine = (text: string): string => escapeForTerminal(text).replace(/\n/g, " ");
 
-/** The title the person reads: who asks to send to whom, cleaned to one line of at most 200 characters. */
-export function titleOf(r: { readonly from: Pick<Request["from"], "container" | "product">; readonly to: Pick<Request["to"], "container" | "product"> }): string {
+/** The title the person reads: who asks to send to whom, cleaned to one line of at most 200 UTF-16 units, never cut inside a surrogate pair. */
+export function titleOf(r: { readonly from: { readonly container: string; readonly product: string }; readonly to: { readonly container: string; readonly product: string } }): string {
   const title = oneLine(`Let this message go? ${r.from.container} (${r.from.product}) to ${r.to.container} (${r.to.product})`);
-  const chars = Array.from(title);
-  return chars.length <= TITLE_CHARS ? title : `${chars.slice(0, TITLE_CHARS - 1).join("")}…`;
+  if (title.length <= TITLE_CHARS) return title;
+  let end = TITLE_CHARS - 1;
+  const last = title.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${title.slice(0, end)}…`;
 }
 
 /**
- * The body as the person reads it. A draft is shown formatted, and formatting can hide text (a link's target, a comment,
- * white-on-white markup), so the body goes inside a code fence longer than any run of backticks in it.
+ * A text as the person reads it. A draft is shown formatted, and formatting can hide text (a link's target, a comment,
+ * white-on-white markup), so the text goes inside a code fence longer than any run of backticks in it.
  */
-export function draftOf(body: string): string {
-  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
+export function draftOf(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(Math.max(3, longest + 1));
-  return `${fence}\n${escapeForTerminal(body)}\n${fence}`;
+  return `${fence}\n${escapeForTerminal(text)}\n${fence}`;
 }
+
+/** Exactly what a yes delivers, as the person is shown it: the receiving session's text, built the way the broker builds it. */
+export const draftForMessage = (r: Request): string => draftOf(render(r));
 
 /** Who is asking, which Elsewire requires: the gateway itself, for one thread. A gateway has no page to link to. */
 export const requesterOf = (r: Request, host: string): Record<string, unknown> => ({
@@ -120,29 +153,60 @@ export function urlProblem(url: string, allowHttp = false): string | null {
   return "ELSEWIRE_URL must be https (http is accepted only for a loopback address, or with ELSEWIRE_ALLOW_HTTP=1 on a network that encrypts on its own)";
 }
 
-type Verdict = "approve" | "refuse" | "none";
+type Verdict = { readonly kind: "approve" } | { readonly kind: "refuse"; readonly reason?: "too-long" } | { readonly kind: "none" };
+const NONE: Verdict = { kind: "none" };
+const REFUSE: Verdict = { kind: "refuse" };
+
+const STOPPED = Symbol("stopped");
+type Stop = { readonly [STOPPED]: StopWhy };
+const isStop = (value: unknown): value is Stop => typeof value === "object" && value !== null && STOPPED in value;
 
 async function decide(r: Request, tools: Tools, state: StateIo, effects: Effects): Promise<Verdict> {
   const { err, now, sleep } = effects;
-  const draft = draftOf(r.body);
+  // A call or a pause that the broker's stop signal cuts short. A request that is being created is not cut: it is finished first,
+  // so that its id is known and can be cancelled or kept.
+  const stopAware = <T>(work: Promise<T>): Promise<T | Stop> => Promise.race([work, effects.stopped.then((why): Stop => ({ [STOPPED]: why }))]);
+  const cancel = async (id: string): Promise<void> => {
+    try {
+      await tools.call("elsewire_cancel", { id }, 10_000);
+    } catch (error) {
+      // The name only: a message of a failed call could quote what was sent.
+      err(`message ${r.id}: the request could not be cancelled (${error instanceof Error ? error.name : "failed"}); it ends by itself at the deadline`);
+    }
+  };
+
+  const draft = draftForMessage(r);
   if (draft.length > MAX_DRAFT_CHARS) {
-    err(`message ${r.id} is longer than ${MAX_DRAFT_CHARS} characters, more than a person can be asked to read in one go: refused without asking`);
-    return "refuse";
+    err(`message ${r.id} is longer than ${MAX_DRAFT_CHARS} characters as a person would read it, more than a person can be asked to read in one go: refused without asking`);
+    return { kind: "refuse", reason: "too-long" };
   }
   const name = stateName(r.id);
   let elsewireId = (await state.read(name))?.trim();
   if (elsewireId === undefined || elsewireId === "") {
-    if (r.decideBy <= now()) return "refuse";
+    if (r.decideBy <= now()) return REFUSE;
+    try {
+      await state.prepare();
+    } catch {
+      err("the state directory cannot be written to, so nothing was asked (a question that is not on disk would be asked again after every restart)");
+      return NONE;
+    }
     const made = created.parse(
       await tools.call(
         "elsewire_request",
-        { connector: "review", title: titleOf(r), draft, timeout_sec: timeoutSeconds(r.decideBy, now()), replies: ["Refuse"], requester: requesterOf(r, effects.host) },
+        // No note: a person could write "don't send" and still send the text. An answer with a note is a refusal below.
+        { connector: "review", title: titleOf(r), draft, timeout_sec: timeoutSeconds(r.decideBy, now()), replies: ["Refuse"], notes: false, requester: requesterOf(r, effects.host) },
         30_000,
       ),
     );
     elsewireId = made.id;
     // Written before the first wait, so a restart picks the same question up again instead of asking twice.
-    await state.write(name, elsewireId);
+    try {
+      await state.write(name, elsewireId);
+    } catch {
+      err(`message ${r.id}: the state file cannot be written; the request is cancelled so that it is not left open without a record`);
+      await cancel(elsewireId);
+      return NONE;
+    }
     err(`asked about message ${r.id}`);
   } else {
     err(`waiting again for the answer about message ${r.id}`);
@@ -151,35 +215,65 @@ async function decide(r: Request, tools: Tools, state: StateIo, effects: Effects
   for (;;) {
     if (now() >= r.decideBy) {
       await state.remove(name);
-      return "refuse";
+      return REFUSE;
     }
     const startedAt = now();
-    const status = awaited.parse(await tools.call("elsewire_await", { id: elsewireId, timeout_sec: AWAIT_SECONDS }, (AWAIT_SECONDS + 15) * 1000));
+    const raw = await stopAware(tools.call("elsewire_await", { id: elsewireId, timeout_sec: AWAIT_SECONDS }, (AWAIT_SECONDS + 15) * 1000));
+    if (isStop(raw)) return onStop(raw[STOPPED], r.id, elsewireId, name, state, cancel, err);
+    const status = awaited.parse(raw);
     switch (status.status) {
       case "pending": {
         // A server that answers "pending" at once would make this a busy loop.
         const took = now() - startedAt;
-        if (took < 1000) await sleep(1000 - took);
+        if (took < 1000) {
+          const paused = await stopAware(sleep(1000 - took));
+          if (isStop(paused)) return onStop(paused[STOPPED], r.id, elsewireId, name, state, cancel, err);
+        }
         continue;
       }
       case "done": {
         await state.remove(name);
-        if (status.answer?.edited === false && status.answer.text === draft) return "approve";
+        const note = status.answer?.note?.trim() ?? "";
+        if (note !== "") {
+          err(`message ${r.id}: the answer carried a note, which the request did not allow; it is a refusal`);
+          return REFUSE;
+        }
+        if (status.answer?.edited === false && status.answer.text === draft) return { kind: "approve" };
         if (status.answer?.edited === true) err(`message ${r.id}: the answer was an edited text; the gateway never rewrites a sender's words, so it is a refusal`);
-        return "refuse";
+        return REFUSE;
       }
       case "denied":
       case "expired":
       case "cancelled":
         await state.remove(name);
-        return "refuse";
+        return REFUSE;
       case "failed":
         // The request is dead on the server: the next try must ask afresh.
         await state.remove(name);
         err(`message ${r.id}: the Elsewire request failed`);
-        return "none";
+        return NONE;
     }
   }
+}
+
+/** SIGTERM: the question is moot, so it is withdrawn. SIGINT: only the broker is going, so the question is left as it is. */
+async function onStop(
+  why: StopWhy,
+  messageId: string,
+  elsewireId: string,
+  name: string,
+  state: StateIo,
+  cancel: (id: string) => Promise<void>,
+  err: (line: string) => void,
+): Promise<Verdict> {
+  if (why === "shutdown") {
+    err(`message ${messageId}: the broker is stopping; the request stays open for the next run`);
+    return NONE;
+  }
+  err(`message ${messageId}: the question is over; the request is cancelled`);
+  await cancel(elsewireId);
+  await state.remove(name).catch(() => undefined);
+  return NONE;
 }
 
 /** Returns the exit code: 0 with an answer on stdout, 1 with none. */
@@ -219,11 +313,15 @@ export async function runElsewireApprover(effects: Effects): Promise<number> {
     return 1;
   }
 
+  const state = effects.state(config.data.state);
+  const swept = await state.sweep(effects.now());
+  if (swept > 0) err(`removed ${swept} old file${swept === 1 ? "" : "s"} from the state directory`);
+
   const tools = effects.connect(config.data.ELSEWIRE_URL, token);
   try {
-    const verdict = await decide(parsed, tools, effects.state(config.data.state), effects);
-    if (verdict === "none") return 1;
-    out(JSON.stringify({ answer: verdict }));
+    const verdict = await decide(parsed, tools, state, effects);
+    if (verdict.kind === "none") return 1;
+    out(JSON.stringify(verdict.kind === "refuse" && verdict.reason !== undefined ? { answer: "refuse", reason: verdict.reason } : { answer: verdict.kind }));
     return 0;
   } catch (error) {
     // The name only: a message of a failed call could quote what was sent.
@@ -268,6 +366,9 @@ export function mcpTools(url: string, token: string): Tools {
   };
 }
 
+const STATE_FILE = /^[0-9a-f]{64}$/;
+const TMP_FILE = /^[0-9a-f]{64}\.\d+\.tmp$/;
+
 export function nodeState(dir: string): StateIo {
   const file = (name: string): string => join(dir, name);
   return {
@@ -280,13 +381,44 @@ export function nodeState(dir: string): StateIo {
       }
     },
     write: async (name, content) => {
-      await mkdir(dir, { recursive: true, mode: 0o700 });
       const temp = file(`${name}.${process.pid}.tmp`);
-      await writeFile(temp, content, { mode: 0o600 });
-      await rename(temp, file(name));
+      try {
+        await writeFile(temp, content, { mode: 0o600 });
+        await rename(temp, file(name));
+      } catch (error) {
+        await rm(temp, { force: true }).catch(() => undefined);
+        throw error;
+      }
     },
     remove: async (name) => {
       await rm(file(name), { force: true });
+    },
+    prepare: async () => {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      // A folder that already existed keeps whatever mode it had; tighten it when it is ours, and leave someone else's alone.
+      if ((await stat(dir)).uid === process.getuid?.()) await chmod(dir, 0o700);
+      await access(dir, constants.W_OK | constants.X_OK);
+    },
+    sweep: async (nowMs) => {
+      let removed = 0;
+      try {
+        for (const name of await readdir(dir)) {
+          const maxAge = STATE_FILE.test(name) ? STATE_MAX_AGE_MS : TMP_FILE.test(name) ? TMP_MAX_AGE_MS : undefined;
+          if (maxAge === undefined) continue;
+          try {
+            const info = await stat(file(name));
+            if (info.isFile() && nowMs - info.mtimeMs > maxAge) {
+              await rm(file(name), { force: true });
+              removed += 1;
+            }
+          } catch {
+            // Gone already, or not ours to remove: the next run tries again.
+          }
+        }
+      } catch {
+        // No folder yet, or none that can be read: there is nothing to clean.
+      }
+      return removed;
     },
   };
 }

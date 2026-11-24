@@ -88,9 +88,11 @@ export async function runAdmin(argv: readonly string[], env: Readonly<Record<str
             io.err(
               answered.why === "not-found"
                 ? `no message ${id}`
-                : answered.why === "timed-out"
-                  ? `message ${id} was waiting past its deadline, so it was refused as unanswered`
-                  : `message ${id} is not waiting for an answer`,
+                : answered.why === "busy"
+                  ? `the store is busy, so message ${id} was not answered; try again`
+                  : answered.why === "timed-out"
+                    ? `message ${id} was waiting past its deadline, so it was refused as unanswered`
+                    : `message ${id} is not waiting for an answer`,
             );
             return 1;
           }

@@ -30,6 +30,32 @@ describe("GET /healthz", () => {
     expect((await fetch(adapterUrl(h, "/healthz"), { method: "HEAD" })).status).toBe(200);
   });
 
+  it("answers 503 when the poll loop has not completed a run for 30 s, and 200 again after the next run", async () => {
+    const clock = { t: 5_000_000 };
+    const loops: (() => void)[] = [];
+    h = await startHarness({
+      policy: ALLOW_ALL,
+      effects: {
+        now: () => clock.t,
+        every: (_ms, fn) => {
+          loops.push(fn);
+          return () => undefined;
+        },
+      },
+    });
+    expect((await fetch(adapterUrl(h, "/healthz"))).status).toBe(200);
+    clock.t += 30_000;
+    expect((await fetch(adapterUrl(h, "/healthz"))).status).toBe(200);
+    clock.t += 1;
+    const stale = await fetch(adapterUrl(h, "/healthz"));
+    expect(stale.status).toBe(503);
+    expect(await stale.text()).toBe("not ok\n");
+    expect((await fetch(adapterUrl(h, "/healthz"), { method: "HEAD" })).status).toBe(503);
+    // The first loop the broker started is the poll.
+    loops[0]?.();
+    expect((await fetch(adapterUrl(h, "/healthz"))).status).toBe(200);
+  });
+
   it("leaves the token-guarded routes as they were", async () => {
     h = await startHarness({ policy: ALLOW_ALL });
     expect((await fetch(adapterUrl(h, "/adapter/stream"))).status).toBe(401);

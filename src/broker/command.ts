@@ -10,7 +10,8 @@
  */
 import type { Approver } from "./approver.js";
 import { escapeForTerminal } from "./approver.js";
-import type { ApprovalRequest, Service } from "./service.js";
+import { REFUSAL_CODES } from "./service.js";
+import type { Answered, ApprovalRequest, RefusalCode, Service } from "./service.js";
 
 export const MAX_ANSWER_BYTES = 64 * 1024;
 export const MAX_CHILDREN = 16;
@@ -23,13 +24,29 @@ export type ChildResult =
   | { readonly ok: true; readonly stdout: string; readonly stderr: string }
   | { readonly ok: false; readonly why: string; readonly stderr: string };
 
-/** A running program. `stop` is idempotent: SIGTERM now, SIGKILL after the grace, always to the child's own PID. */
-export type Child = { readonly done: Promise<ChildResult>; readonly stop: () => void };
+/**
+ * Why a program is stopped, told to it by the signal: `moot` (SIGTERM) means its question is over, because the message was answered
+ * elsewhere, reached its deadline or is not held any more, so it should withdraw what it asked; `shutdown` (SIGINT) means only the
+ * broker is going away, the message is still held and the program should leave its question as it is for the next broker to pick up.
+ */
+export type StopWhy = "moot" | "shutdown";
+
+/** A running program. `stop` is idempotent, the first reason wins: the signal now, SIGKILL after the grace. */
+export type Child = { readonly done: Promise<ChildResult>; readonly stop: (why: StopWhy) => void };
 export type Spawn = (argv: readonly string[], env: Readonly<Record<string, string>>, input: string) => Child;
 /** Runs `fn` once after `ms`; the returned function cancels it. */
 export type After = (ms: number, fn: () => void) => () => void;
 
-export type Timing = { readonly retryFirstMs: number; readonly retryMaxMs: number; readonly maxChildren: number };
+export type Timing = {
+  readonly retryFirstMs: number;
+  readonly retryMaxMs: number;
+  readonly maxChildren: number;
+  /** How many more times an answer is written when the store was busy, and the wait before the first of them (it doubles). */
+  readonly answerRetries?: number;
+  readonly answerBackoffMs?: number;
+};
+export const ANSWER_RETRIES = 4;
+export const ANSWER_BACKOFF_MS = 250;
 export const defaultTiming: Timing = { retryFirstMs: RETRY_FIRST_MS, retryMaxMs: RETRY_MAX_MS, maxChildren: MAX_CHILDREN };
 
 export type CommandDeps = {
@@ -77,8 +94,11 @@ export function childEnv(
   return out;
 }
 
-/** `approve`, `refuse`, or null for anything that is not exactly one such answer. */
-export function parseAnswer(stdout: string): "approve" | "refuse" | null {
+/** What a program may answer. `reason` is only for a refusal, and only one of `REFUSAL_CODES`. */
+export type Answer = { readonly answer: "approve" } | { readonly answer: "refuse"; readonly reason?: RefusalCode };
+
+/** An approve, a refuse (with one of the fixed reason codes, or none), or null for anything else. */
+export function parseAnswer(stdout: string): Answer | null {
   let json: unknown;
   try {
     json = JSON.parse(stdout.trim());
@@ -86,8 +106,12 @@ export function parseAnswer(stdout: string): "approve" | "refuse" | null {
     return null;
   }
   if (typeof json !== "object" || json === null || Array.isArray(json)) return null;
-  const answer = (json as Record<string, unknown>)["answer"];
-  return answer === "approve" || answer === "refuse" ? answer : null;
+  const { answer, reason } = json as Record<string, unknown>;
+  if (answer === "approve") return reason === undefined ? { answer } : null;
+  if (answer !== "refuse") return null;
+  if (reason === undefined) return { answer };
+  const code = REFUSAL_CODES.find((c) => c === reason);
+  return code === undefined ? null : { answer, reason: code };
 }
 
 /** 30 s for the first retry, doubling, never more than `max`. `attempts` is how many runs have ended without an answer. */
@@ -104,22 +128,25 @@ type Entry = {
 };
 
 const oneLine = (text: string): string => escapeForTerminal(text).replace(/\n/g, " ");
+const errorName = (error: unknown): string => (error instanceof Error ? error.name : "error");
 
 export function makeCommandApprover(deps: CommandDeps): Approver {
   const { service, spawn, after, now, log } = deps;
   const timing = deps.timing ?? defaultTiming;
+  const answerRetries = timing.answerRetries ?? ANSWER_RETRIES;
+  const answerBackoffMs = timing.answerBackoffMs ?? ANSWER_BACKOFF_MS;
   const env = childEnv(deps.env, deps.passEnv, deps.stateDir);
   const entries = new Map<string, Entry>();
   const queue: Entry[] = [];
   const running = new Set<Promise<unknown>>();
   let closed = false;
 
-  const forget = (entry: Entry): void => {
+  const forget = (entry: Entry, why: StopWhy = "moot"): void => {
     if (entries.get(entry.request.id) !== entry) return;
     entries.delete(entry.request.id);
     entry.cancelDeadline();
     entry.cancelRetry?.();
-    entry.child?.stop();
+    entry.child?.stop(why);
   };
 
   const stderrLines = (id: string, stderr: string): void => {
@@ -138,10 +165,32 @@ export function makeCommandApprover(deps: CommandDeps): Approver {
     entry.phase = "running";
     const child = spawn(deps.argv, env, requestJson(entry.request));
     entry.child = child;
-    const settled = child.done.then((result) => finished(entry, result));
+    // Nothing that goes wrong in here may escape as a rejection: it would end the broker. The entry is never left in `running`.
+    const settled = child.done
+      .then((result) => finished(entry, result))
+      .catch((error: unknown) => {
+        entry.child = null;
+        if (entries.get(entry.request.id) === entry) noAnswer(entry, `an internal error (${errorName(error)})`);
+      });
     running.add(settled);
     void settled.finally(() => {
       running.delete(settled);
+      pump();
+    });
+  }
+
+  /** The message stays held: the program is run again after a wait that grows, until the message stops being held. */
+  function noAnswer(entry: Entry, why: string): void {
+    const { id } = entry.request;
+    entry.failures += 1;
+    const delay = retryDelay(entry.failures, timing.retryFirstMs, timing.retryMaxMs);
+    log(`approver command gave no answer for message ${id} (${why}); trying again in ${Math.round(delay / 1000)} s while it is held`);
+    entry.phase = "backoff";
+    entry.cancelRetry = after(delay, () => {
+      entry.cancelRetry = null;
+      if (entries.get(id) !== entry) return;
+      entry.phase = "waiting";
+      queue.push(entry);
       pump();
     });
   }
@@ -152,26 +201,35 @@ export function makeCommandApprover(deps: CommandDeps): Approver {
     if (entries.get(id) !== entry) return; // stopped meanwhile: the message is no longer ours to answer
     stderrLines(id, result.stderr);
     const answer = result.ok ? parseAnswer(result.stdout) : null;
-    if (answer === null) {
-      entry.failures += 1;
-      const delay = retryDelay(entry.failures, timing.retryFirstMs, timing.retryMaxMs);
-      log(`approver command gave no answer for message ${id} (${result.ok ? "its output was not an answer" : result.why}); trying again in ${Math.round(delay / 1000)} s while it is held`);
+    if (answer === null) return noAnswer(entry, result.ok ? "its output was not an answer" : result.why);
+    apply(entry, answer, 0);
+  }
+
+  /**
+   * Writes the program's answer. A write lost to a busy store is tried again a few times with a short wait, because a real yes
+   * must not be dropped; if the store stays busy the answer counts as none and the program is run again as usual.
+   */
+  function apply(entry: Entry, answer: Answer, retried: number): void {
+    const { id } = entry.request;
+    if (entries.get(id) !== entry) return;
+    let applied: Answered;
+    try {
+      applied = answer.answer === "approve" ? service.approve(id) : service.refuse(id, answer.reason);
+    } catch (error) {
+      log(`approver command answered ${answer.answer} for message ${id}, but the store failed (${errorName(error)})`);
+      applied = { ok: false, why: "busy" };
+    }
+    if (!applied.ok && applied.why === "busy") {
+      if (retried >= answerRetries) return noAnswer(entry, "the store stayed busy, so its answer could not be written");
       entry.phase = "backoff";
-      entry.cancelRetry = after(delay, () => {
+      entry.cancelRetry = after(answerBackoffMs * 2 ** retried, () => {
         entry.cancelRetry = null;
-        if (entries.get(id) !== entry) return;
-        entry.phase = "waiting";
-        queue.push(entry);
-        pump();
+        apply(entry, answer, retried + 1);
       });
       return;
     }
-    const applied = answer === "approve" ? service.approve(id) : service.refuse(id);
-    log(
-      applied.ok
-        ? `approver command ${answer === "approve" ? "approved" : "refused"} message ${id}`
-        : `approver command answered ${answer} for message ${id}, but it is not held any more (${applied.why})`,
-    );
+    const word = answer.answer === "approve" ? "approved" : "refused";
+    log(applied.ok ? `approver command ${word} message ${id}` : `approver command answered ${answer.answer} for message ${id}, but it is not held any more (${applied.why})`);
     forget(entry);
   }
 
@@ -202,7 +260,8 @@ export function makeCommandApprover(deps: CommandDeps): Approver {
 
     close: async () => {
       closed = true;
-      for (const entry of [...entries.values()]) forget(entry);
+      // The messages are still held: the programs are only told the broker is going away, so what they asked stays open for the next broker.
+      for (const entry of [...entries.values()]) forget(entry, "shutdown");
       queue.length = 0;
       await Promise.allSettled([...running]);
     },

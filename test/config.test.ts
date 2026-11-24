@@ -30,6 +30,15 @@ describe("parseConfig", () => {
     expect(r.config.policy.limits.maxHops).toBe(6);
   });
 
+  it("caps every duration that feeds a timer at 7 days, and says so", () => {
+    const week = 7 * 86_400_000;
+    const r = parseConfig({ ...base, deliveryTimeoutMs: week, pollMs: week, policy: { limits: { approvalTtlMs: week } } });
+    expect(r.ok && r.config.policy.limits.approvalTtlMs).toBe(week);
+    expect(problems({ ...base, policy: { limits: { approvalTtlMs: week + 1 } } })).toEqual(["policy.limits.approvalTtlMs: must be at most 7 days (604800000 ms)"]);
+    expect(problems({ ...base, deliveryTimeoutMs: 2 ** 31 })).toEqual(["deliveryTimeoutMs: must be at most 7 days (604800000 ms)"]);
+    expect(problems({ ...base, pollMs: week + 1 })).toEqual(["pollMs: must be at most 7 days (604800000 ms)"]);
+  });
+
   it("accepts an empty policy, which refuses everything", () => {
     const r = parseConfig(base);
     expect(r.ok && r.config.policy.rules).toEqual([]);

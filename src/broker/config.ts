@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
-import { parsePolicy } from "../core/policy.js";
+import { MAX_DURATION_MS, parsePolicy } from "../core/policy.js";
 import { PRODUCTS } from "../core/types.js";
 import type { Policy, Product } from "../core/types.js";
 
 const port = z.number().int().min(0).max(65_535);
+const duration = z.number().int().min(1).max(MAX_DURATION_MS, { error: "must be at most 7 days (604800000 ms)" });
 
 const approverConfig = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("cli") }),
@@ -34,9 +35,9 @@ const config = z.strictObject({
   /** The token label of each container, and the one product it runs. The label is what a token proves. */
   containers: z.record(z.string().min(1), z.strictObject({ product: z.enum(PRODUCTS) })),
   /** How long a handed-out message may wait for its outcome before it goes back to the queue. */
-  deliveryTimeoutMs: z.number().int().min(1).default(60_000),
+  deliveryTimeoutMs: duration.default(60_000),
   /** How often the broker expires, retries, asks for approvals and pushes what waits. */
-  pollMs: z.number().int().min(1).default(1000),
+  pollMs: duration.default(1000),
   /** Who answers a held message besides the command line. Default: only the command line. */
   approver: approverConfig.default({ kind: "cli" }),
   policy: z.unknown().default({}),

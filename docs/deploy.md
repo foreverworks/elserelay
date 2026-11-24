@@ -13,12 +13,25 @@ with a read-only root file system and one writable volume, `/data`.
 
 ```sh
 docker build -t agent-gateway .
-docker run -d --name gateway --read-only --cap-drop ALL \
+docker run -d --name gateway --init --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
   -v gateway-data:/data \
+  -e ELSEWIRE_URL=https://elsewire.example.com/mcp \
+  -e ELSEWIRE_TOKEN_FILE=/run/secrets/elsewire-token \
+  -v /etc/agent-gateway/elsewire-token:/run/secrets/elsewire-token:ro \
   -p 127.0.0.1:7410:7410 -p 127.0.0.1:7411:7411 \
   agent-gateway
 ```
+
+`--init` puts a small init program in front of Node as process 1. The broker
+starts the approver command as a child process, and a process 1 that does not
+reap its orphans lets them pile up as zombies. The two `ELSEWIRE_` lines and the
+token mount belong to the Elsewire approver in the configuration example below
+(without that approver, leave them out): the variables are named in `passEnv`,
+and `ELSEWIRE_TOKEN_FILE` is a path inside the container, so the token is mounted
+there, read-only, from a file on the host that user 10001 can read
+(`chown 10001 /etc/agent-gateway/elsewire-token && chmod 400 ...`). The token
+itself never goes in an environment variable, a config file or the image.
 
 The image expects `/data/config.json` (the `AGENT_GATEWAY_CONFIG` variable
 points there) and, if the config says so, the tokens and the SQLite file under
@@ -30,6 +43,30 @@ The image's healthcheck runs `agent-gateway health`, which asks
 `http://127.0.0.1:7411/healthz`. If the config uses another adapter port, set
 `AGENT_GATEWAY_HEALTH_URL` on the container to match.
 
+### Reaching the broker from other hosts
+
+The example publishes both ports on `127.0.0.1`, which only agents on the same
+machine can reach. Agent containers on other hosts need the ports on an address
+they can route to, and that address should be a private one: the broker's doors
+speak plain HTTP, and every request carries a bearer token, so they belong on a
+private network, a VPN or behind a TLS-terminating proxy, never on a public
+interface.
+
+```sh
+# 192.0.2.5 stands for the broker host's address on the private network.
+docker run -d --name gateway --init ... \
+  -p 192.0.2.5:7410:7410 -p 192.0.2.5:7411:7411 \
+  agent-gateway
+```
+
+Inside the container the config binds `listen.host` to `0.0.0.0` (as in the
+example below), and what is reachable from outside is decided by the address in
+`-p`. Without a container, set `listen.host` to the private address itself. The
+MCP door refuses a request whose `Host` is not the loopback address, so list the
+name the agents use in `listen.allowedHosts`. Then point each agent's adapter at
+`http://<that name or address>:7411` and its MCP client at
+`http://<that name or address>:7410/mcp`.
+
 Without a container: `npm ci && npm run build`, then
 `node dist/cli.js broker --config /etc/agent-gateway/config.json`. Node 26 or
 later is required.
@@ -37,10 +74,20 @@ later is required.
 ## Health
 
 `GET /healthz` on the adapter port answers `200` and the word `ok` to anyone,
-with no token, and says nothing else: no version, no counts. It only shows that
-the process is up and the port is open. `agent-gateway health <url>` asks it and
-exits 0 on a 200 and 1 on anything else, for a healthcheck on a machine without
-curl. With no argument it reads `AGENT_GATEWAY_HEALTH_URL`.
+with no token, and says nothing else: no version, no counts. `agent-gateway
+health <url>` asks it and exits 0 on a 200 and 1 on anything else, for a
+healthcheck on a machine without curl. With no argument it reads
+`AGENT_GATEWAY_HEALTH_URL`.
+
+What a `200` proves: the process is up, the adapter port is open, and the
+broker's poll loop (the one that expires, retries, asks approvers and pushes) has
+completed a run in the last 30 seconds, or in the last three poll periods when
+`pollMs` is more than 10 seconds. It answers `503` with `not ok` when that is not
+so, whether the loop is stuck, stopped or failing every time (the log says why).
+
+What it does not prove: that any adapter is connected, that a product
+accepts messages, that the approver is reachable, or that anything is being
+delivered. Those are visible in `list_peers` and in the log.
 
 ## Configuration
 
@@ -56,15 +103,15 @@ an error, and an error message lists the problems without quoting the file.
 | `listen.adapterPort` | Port of the adapters' door (and `/healthz`). 0 picks a free one. | required |
 | `listen.allowedHosts` | Host names the MCP door answers besides the loopback ones. Needed when `listen.host` is not a loopback address. | `[]` |
 | `containers` | The containers that may connect: a map from token label to `{ "product": "claude" \| "codex" \| "antigravity" \| "fake" }`. The product is bound to the label here, not by what an adapter says. | required |
-| `deliveryTimeoutMs` | How long a handed-out message may wait for its outcome before it goes back to the queue. | `60000` |
-| `pollMs` | How often the broker expires, retries, asks for approvals and pushes what waits. | `1000` |
+| `deliveryTimeoutMs` | How long a handed-out message may wait for its outcome before it goes back to the queue. At most 7 days. | `60000` |
+| `pollMs` | How often the broker expires, retries, asks for approvals and pushes what waits. At most 7 days. | `1000` |
 | `approver` | Who is asked about a held message, besides the command line: `{ "kind": "cli" }` or `{ "kind": "command", ... }`, see below. | `{ "kind": "cli" }` |
 | `policy.rules` | Rules in order, the first match decides, no match is a refusal. Each is `{ name, from, to, decision, wake? }`. `from` and `to` match on `container` and `product`, both optional. `decision` is `allow`, `deny` or `ask`. `wake: true` lets a message wake a cold session. A rule may only name containers that are in `containers`. | `[]` |
 | `policy.limits.maxHops` | Replies in a thread before a message is refused. | `6` |
 | `policy.limits.rate` | `{ messages, windowMs }`: messages per pair of containers in a sliding window. | `20` per `3600000` |
-| `policy.limits.maxBodyChars` | The longest body, in characters. | `16000` |
+| `policy.limits.maxBodyChars` | The longest body, in characters. With the Elsewire approver keep it under about 2800: a message whose text, with the gateway's header, passes what a person can be asked to read (4000 characters) is refused for length, see below. | `16000` |
 | `policy.limits.messageTtlMs` | How long a message may wait before it expires. | `86400000` |
-| `policy.limits.approvalTtlMs` | How long a held message waits for an answer before it is refused. | `900000` |
+| `policy.limits.approvalTtlMs` | How long a held message waits for an answer before it is refused. At most 7 days (`604800000`). | `900000` |
 | `policy.limits.maxAttempts` | Pushed deliveries before a message is refused. | `5` |
 | `policy.limits.refusals` | `{ messages, windowMs }`: refused messages kept per sender container in a window. | `60` per `3600000` |
 
@@ -171,9 +218,11 @@ sessions, or make its unit join that service's mount namespace with
 # /etc/systemd/system/agent-gateway-adapter.service
 [Unit]
 Description=agent-gateway adapter for Claude Code
-After=network-online.target
+After=network-online.target claude-sessions.service
 Wants=network-online.target
 # Share the private /tmp of the service that runs the Claude Code sessions.
+# JoinsNamespaceOf= only takes effect for a unit that is also ordered after that
+# service, so the After= above names it too.
 JoinsNamespaceOf=claude-sessions.service
 
 [Service]
@@ -194,7 +243,8 @@ WantedBy=multi-user.target
 ```
 
 `claude-sessions.service` stands for whatever unit runs your sessions, and it
-must set `PrivateTmp=yes` too. If your sessions do not use a private `/tmp`,
+must set `PrivateTmp=yes` too. The adapter then starts after that service and
+stops before it. If your sessions do not use a private `/tmp`,
 remove both lines. The adapter logs `connected` when its stream to the broker
 is open and `serving` with the sessions it reads when it starts.
 
@@ -213,16 +263,25 @@ example above. Its settings are environment variables:
 |---|---|
 | `ELSEWIRE_URL` | The server's MCP address. It must be `https`; plain `http` is accepted only for a loopback address, so a token never crosses a network in the clear. |
 | `ELSEWIRE_ALLOW_HTTP` | Set to `1` to accept plain `http` to any address. Only for a network that encrypts on its own, such as a WireGuard mesh. |
-| `ELSEWIRE_TOKEN_FILE` | A file holding the bearer token. |
-| `ELSEWIRE_STATE_DIR` | Where it keeps the id of the request it opened for each message. Falls back to the `stateDir` of the config. |
+| `ELSEWIRE_TOKEN_FILE` | A file holding the bearer token, as a path inside the broker's container (see the `docker run` line above). |
+| `ELSEWIRE_STATE_DIR` | Where it keeps the id of the request it opened for each message. Falls back to the `stateDir` of the config. It must be writable and persistent (under `/data`), and the command makes it private to its owner. |
 
 List the ones you set in `passEnv` and set them on the broker's container. A
 command must be idempotent by message id, because after a broker restart the
 program runs again for every message that is still held; the Elsewire command is.
 
-The message is shown inside a code fence, so no formatting in it can hide a part of
-it from the person who decides, and the request says it comes from `agent-gateway`,
-with the message's thread as its session.
+The person is shown the text the receiving session will be handed, the
+gateway's header with the sender's claimed session title and then the body, inside
+a code fence, so no formatting in it can hide a part of it from the person who
+decides and nothing is delivered that was not shown. The request says it comes
+from `agent-gateway`, with the message's thread as its session, and allows no
+note. A message too long for that (4000 characters in all, the header about 900 of
+them) is refused with the reason `too-long`, which the sender reads as "too long
+for a person to approve", not as a person's no: this is why `maxBodyChars` should
+be under about 2800 with this approver. When the broker ends a question (the
+message was answered another way, or it reached its deadline) the request is
+cancelled, so a person is not asked about a message that no longer waits; when the
+broker only restarts, the request stays open and the next run takes it up.
 
 ## Backing up the SQLite file
 

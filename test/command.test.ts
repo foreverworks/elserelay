@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { childEnv, makeCommandApprover, parseAnswer, requestJson, retryDelay } from "../src/broker/command.js";
-import type { Child, ChildResult, Timing } from "../src/broker/command.js";
-import type { ApprovalRequest } from "../src/broker/service.js";
+import type { Child, ChildResult, StopWhy, Timing } from "../src/broker/command.js";
+import type { Answered, ApprovalRequest } from "../src/broker/service.js";
 
 const request = (id: string, changes: Partial<ApprovalRequest> = {}): ApprovalRequest => ({
   id,
@@ -58,8 +58,15 @@ describe("childEnv", () => {
 
 describe("parseAnswer", () => {
   it("accepts exactly an approve or a refuse object, with a line end around it", () => {
-    expect(parseAnswer('{"answer":"approve"}\n')).toBe("approve");
-    expect(parseAnswer(' {"answer":"refuse"} ')).toBe("refuse");
+    expect(parseAnswer('{"answer":"approve"}\n')).toEqual({ answer: "approve" });
+    expect(parseAnswer(' {"answer":"refuse"} ')).toEqual({ answer: "refuse" });
+  });
+
+  it("takes a refusal with the one reason code there is, and no other reason", () => {
+    expect(parseAnswer('{"answer":"refuse","reason":"too-long"}')).toEqual({ answer: "refuse", reason: "too-long" });
+    for (const bad of ['{"answer":"refuse","reason":"because"}', '{"answer":"refuse","reason":""}', '{"answer":"refuse","reason":null}', '{"answer":"refuse","reason":["too-long"]}', '{"answer":"approve","reason":"too-long"}']) {
+      expect(parseAnswer(bad)).toBeNull();
+    }
   });
 
   it("takes anything else as no answer", () => {
@@ -80,8 +87,8 @@ function rig(timing?: Timing) {
   let t = 1000;
   const logs: string[] = [];
   const answered: string[] = [];
-  let applied: { ok: true } | { ok: false; why: "not-found" | "not-held" | "timed-out" } = { ok: true };
-  type Run = { argv: readonly string[]; env: Readonly<Record<string, string>>; input: string; finish: (r: ChildResult) => void; stopped: boolean };
+  let applied: Answered | (() => Answered) = { ok: true };
+  type Run = { argv: readonly string[]; env: Readonly<Record<string, string>>; input: string; finish: (r: ChildResult) => void; stopped: boolean; why: StopWhy | null };
   const runs: Run[] = [];
   const timers: { at: number; fn: () => void; live: boolean }[] = [];
   const spawn = (argv: readonly string[], env: Readonly<Record<string, string>>, input: string): Child => {
@@ -89,12 +96,13 @@ function rig(timing?: Timing) {
     const done = new Promise<ChildResult>((resolve) => {
       finish = resolve;
     });
-    const run: Run = { argv, env, input, finish, stopped: false };
+    const run: Run = { argv, env, input, finish, stopped: false, why: null };
     runs.push(run);
     return {
       done,
-      stop: () => {
+      stop: (why) => {
         run.stopped = true;
+        run.why ??= why;
         finish({ ok: false, why: "stopped", stderr: "" });
       },
     };
@@ -104,8 +112,8 @@ function rig(timing?: Timing) {
     passEnv: [],
     env: { PATH: "/bin", SECRET: "no" },
     service: {
-      approve: (id) => (answered.push(`approve ${id}`), applied),
-      refuse: (id) => (answered.push(`refuse ${id}`), applied),
+      approve: (id) => (answered.push(`approve ${id}`), typeof applied === "function" ? applied() : applied),
+      refuse: (id, reason) => (answered.push(reason === undefined ? `refuse ${id}` : `refuse ${id} (${reason})`), typeof applied === "function" ? applied() : applied),
     },
     spawn,
     after: (ms, fn) => {
@@ -128,7 +136,7 @@ function rig(timing?: Timing) {
     }
     await settle();
   };
-  return { approver, runs, logs, answered, advance, setApplied: (a: typeof applied) => (applied = a) };
+  return { approver, runs, logs, answered, advance, setApplied: (a: typeof applied) => (applied = a), now: () => t };
 }
 
 const settle = async (): Promise<void> => {
@@ -312,5 +320,108 @@ describe("the command approver", () => {
     expect(r.runs).toHaveLength(2);
     await r.advance(10 * 60_000);
     expect(r.runs).toHaveLength(2);
+  });
+
+  it("tells a program why it is stopped: the question is moot, or only the broker is closing", async () => {
+    const r = rig();
+    await r.approver.ask(request("m1"));
+    await r.approver.ask(request("m2"));
+    await r.approver.ask(request("m3", { decideBy: 1000 + 5000 }));
+    r.approver.sync?.(new Set(["m2", "m3"]));
+    await r.advance(5000);
+    expect(r.runs.map((x) => x.why)).toEqual(["moot", null, "moot"]);
+    await r.approver.close?.();
+    expect(r.runs.map((x) => x.why)).toEqual(["moot", "shutdown", "moot"]);
+  });
+
+  it("passes a refusal's reason code on to the service", async () => {
+    const r = rig();
+    await r.approver.ask(request("m1"));
+    r.runs[0]?.finish(ok('{"answer":"refuse","reason":"too-long"}'));
+    await settle();
+    expect(r.answered).toEqual(["refuse m1 (too-long)"]);
+    await r.approver.ask(request("m2"));
+    r.runs[1]?.finish(ok('{"answer":"refuse","reason":"nonsense"}'));
+    await settle();
+    expect(r.answered).toEqual(["refuse m1 (too-long)"]);
+    expect(r.logs.join("\n")).toContain("gave no answer for message m2");
+  });
+
+  it("does not end the broker when the service throws: it logs the error's name, never the body, and tries again as for no answer", async () => {
+    const unhandled: unknown[] = [];
+    const record = (e: unknown): number => unhandled.push(e);
+    process.on("unhandledRejection", record);
+    try {
+      const r = rig();
+      r.setApplied(() => {
+        throw Object.assign(new Error("database is locked: SECRET BODY TEXT"), { name: "BusyError" });
+      });
+      await r.approver.ask(request("m1"));
+      r.runs[0]?.finish(ok('{"answer":"approve"}'));
+      await settle();
+      // The write is tried again a few times, then the answer counts as none and the program runs again.
+      for (let i = 0; i < 6; i++) await r.advance(250 * 2 ** i);
+      expect(r.answered.length).toBe(5);
+      expect(r.logs.join("\n")).toContain("the store failed (BusyError)");
+      expect(r.logs.join("\n")).toContain("gave no answer for message m1 (the store stayed busy");
+      expect(r.logs.join("\n")).not.toContain("SECRET BODY TEXT");
+      await r.advance(30_000);
+      expect(r.runs).toHaveLength(2);
+      // Nothing is left in `running`: closing returns.
+      r.runs[1]?.finish(ok('{"answer":"approve"}'));
+      r.setApplied({ ok: true });
+      await r.approver.close?.();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+  });
+
+  it("writes a yes that met a busy store again after a short wait, and does not forget the message meanwhile", async () => {
+    const r = rig();
+    let busy = 2;
+    r.setApplied(() => (busy-- > 0 ? { ok: false, why: "busy" } : { ok: true }));
+    await r.approver.ask(request("m1"));
+    r.runs[0]?.finish(ok('{"answer":"approve"}'));
+    await settle();
+    expect(r.answered).toEqual(["approve m1"]);
+    expect(r.runs[0]?.stopped).toBe(false);
+    await r.advance(250);
+    expect(r.answered).toEqual(["approve m1", "approve m1"]);
+    await r.advance(499);
+    expect(r.answered).toHaveLength(2);
+    await r.advance(1);
+    expect(r.answered).toEqual(["approve m1", "approve m1", "approve m1"]);
+    expect(r.logs.join("\n")).toContain("approver command approved message m1");
+    await r.advance(10 * 60_000);
+    expect(r.runs).toHaveLength(1);
+  });
+
+  it("gives up on a store that stays busy, treats it as no answer, and the next run's yes counts", async () => {
+    const r = rig();
+    r.setApplied({ ok: false, why: "busy" });
+    await r.approver.ask(request("m1", { decideBy: 10_000_000 }));
+    r.runs[0]?.finish(ok('{"answer":"approve"}'));
+    await settle();
+    for (let i = 0; i < 4; i++) await r.advance(250 * 2 ** i);
+    expect(r.answered).toHaveLength(5);
+    expect(r.logs.join("\n")).toContain("the store stayed busy");
+    r.setApplied({ ok: true });
+    await r.advance(30_000);
+    expect(r.runs).toHaveLength(2);
+    r.runs[1]?.finish(ok('{"answer":"approve"}'));
+    await settle();
+    expect(r.answered).toHaveLength(6);
+  });
+
+  it("stops writing a yes again when the message stops being held meanwhile", async () => {
+    const r = rig();
+    r.setApplied({ ok: false, why: "busy" });
+    await r.approver.ask(request("m1"));
+    r.runs[0]?.finish(ok('{"answer":"approve"}'));
+    await settle();
+    r.approver.sync?.(new Set());
+    await r.advance(10_000);
+    expect(r.answered).toEqual(["approve m1"]);
   });
 });

@@ -29,14 +29,26 @@ export function fenceFor(body: string): string {
   return "`".repeat(Math.max(3, longest + 1));
 }
 
-/** What a receiving session is shown: a fixed header written by the gateway, then the sender's text inside a fence. */
-export function render(message: Message): string {
+/** The parts of a message that its delivered text is made of: all of them are fixed when it is sent, so the text never changes. */
+export type Renderable = Pick<Message, "id" | "thread" | "hop" | "from" | "body">;
+
+/**
+ * The claimed session title as `render` shows it. The title is the one stored with the message when it was sent, never one read
+ * from the peer's report later, so an approver can show it before the message is delivered.
+ */
+export const claimedTitle = (message: Pick<Message, "from">): string => quoted(message.from.title ?? "");
+
+/**
+ * What a receiving session is shown: a fixed header written by the gateway, then the sender's text inside a fence.
+ * It depends only on the fields of `Renderable`, so an approver can compute exactly what a yes will deliver.
+ */
+export function render(message: Renderable): string {
   const fence = fenceFor(message.body);
   const header = [
     "This is a message from another agent session, delivered through the agent gateway.",
     `Container: ${quoted(message.from.container)} (verified by the gateway)`,
     `Product: ${quoted(message.from.product)}`,
-    `Session title: ${quoted(message.from.title ?? "")} (claimed by the sender, not verified)`,
+    `Session title: ${claimedTitle(message)} (claimed by the sender, not verified)`,
     `Session id: ${quoted(message.from.session)} (claimed by the sender, not verified)`,
     `Thread: ${quoted(message.thread)}`,
     `Hop: ${message.hop}`,

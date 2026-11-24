@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Rig } from "./broker-fixtures.js";
-import { ALLOW_ALL, policyOf, report, rig, seen } from "./broker-fixtures.js";
+import { makeService } from "../src/broker/service.js";
+import { reasonText, senderText } from "../src/broker/reasons.js";
+import type { Store } from "../src/store/types.js";
+import { ALLOW_ALL, PRODUCTS_OF, policyOf, report, rig, seen } from "./broker-fixtures.js";
 
 let current: Rig | undefined;
 const make = (policy: unknown = ALLOW_ALL, deliveryTimeoutMs?: number): Rig => {
@@ -581,6 +584,75 @@ describe("approvals", () => {
     if (sent.kind !== "accepted") throw new Error("not held");
     expect(r.service.approve(sent.id)).toEqual({ ok: true });
     expect(r.store.get(sent.id)?.state).toBe("queued");
+  });
+});
+
+describe("answering a held message", () => {
+  const ASK = { rules: [{ name: "ask", from: {}, to: {}, decision: "ask" }] };
+  const held = (r: Rig): string => {
+    const sent = r.service.send("alpha", alpha, to("b1"), "x");
+    if (sent.kind !== "accepted") throw new Error("not held");
+    return sent.id;
+  };
+  /** The same store, with a write that fails the way a busy database does, and then lets the others through. */
+  const flaky = (r: Rig, after: () => void = () => undefined) => {
+    const state = { busy: true };
+    const store: Store = {
+      ...r.store,
+      applyIf: (...args) => {
+        if (state.busy) {
+          after();
+          throw new Error("database is locked");
+        }
+        return r.store.applyIf(...args);
+      },
+    };
+    const service = makeService({ store, policy: policyOf(ASK), products: PRODUCTS_OF, now: () => r.clock.t, newId: () => "x", deliveryTimeoutMs: 1000 });
+    return { state, service };
+  };
+
+  it("says busy, not not-held, when the write is lost to a busy store, and the message stays held for another try", () => {
+    const r = make(ASK);
+    const id = held(r);
+    const { state, service } = flaky(r);
+    expect(service.approve(id)).toEqual({ ok: false, why: "busy" });
+    expect(service.refuse(id)).toEqual({ ok: false, why: "busy" });
+    expect(r.store.get(id)?.state).toBe("held");
+    state.busy = false;
+    expect(service.approve(id)).toEqual({ ok: true });
+    expect(r.store.get(id)?.state).toBe("queued");
+  });
+
+  it("still says not-held when the write failed because someone else answered first", () => {
+    const r = make(ASK);
+    const id = held(r);
+    const { service } = flaky(r, () => void r.service.refuse(id));
+    expect(service.approve(id)).toEqual({ ok: false, why: "not-held" });
+    expect(r.store.get(id)).toMatchObject({ state: "refused", reason: { kind: "approver", answer: "no" } });
+  });
+
+  it("refuses with a reason code of the approver's own, which the sender reads as different from a person's no", () => {
+    const r = make(ASK);
+    const id = held(r);
+    expect(r.service.refuse(id, "too-long")).toEqual({ ok: true });
+    const reason = r.store.get(id)?.reason;
+    expect(reason).toEqual({ kind: "approver", answer: "too-long" });
+    if (reason === null || reason === undefined) throw new Error("no reason");
+    expect(senderText(reason)).toBe("the message is too long for a person to approve; send a shorter one");
+    expect(senderText({ kind: "approver", answer: "no" })).toBe("a person refused it");
+    expect(reasonText(reason)).not.toBe(reasonText({ kind: "approver", answer: "no" }));
+  });
+
+  it("delivers the title the sender claimed when it sent, even when the peer's own report says something else by then", () => {
+    const r = make(ASK);
+    const id = held(r);
+    r.service.report("alpha", report("claude", [seen("a1", "idle", "Renamed later")]));
+    expect(r.service.approvals().map((a) => a.from.title)).toEqual(["Alpha one"]);
+    expect(r.service.approve(id)).toEqual({ ok: true });
+    const pulled = r.service.inbox("beta", "b1");
+    if (pulled.kind !== "ok") throw new Error("forbidden");
+    expect(pulled.messages[0]?.text).toContain('Session title: "Alpha one" (claimed by the sender, not verified)');
+    expect(pulled.messages[0]?.text).not.toContain("Renamed later");
   });
 });
 

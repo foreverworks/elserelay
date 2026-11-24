@@ -84,15 +84,93 @@ describe("nodeSpawn", () => {
     const b = nodeSpawn({ graceMs: 200 })(program("b", `import { writeFileSync } from "node:fs"; process.on("SIGTERM", () => {}); writeFileSync(${JSON.stringify(ignores)}, String(process.pid)); setInterval(() => {}, 1000);`), ENV, "{}");
     await waitFor("both programs to run", () => existsSync(listens) && existsSync(ignores) && readFileSync(listens, "utf8") !== "" && readFileSync(ignores, "utf8") !== "");
     const started = Date.now();
-    a.stop();
-    a.stop();
+    a.stop("moot");
+    a.stop("moot");
     expect(await a.done).toMatchObject({ ok: false, why: "stopped" });
     expect(Date.now() - started).toBeLessThan(2000);
-    b.stop();
+    b.stop("moot");
     expect(alive(readPid(ignores))).toBe(true);
     expect(await b.done).toMatchObject({ ok: false, why: "stopped" });
     expect(alive(readPid(listens))).toBe(false);
     expect(alive(readPid(ignores))).toBe(false);
+  });
+
+  it("does not wait for a helper that keeps the output open after the program ended, and lets go of its pipes", async () => {
+    const helperPid = join(dir, "helper-pid");
+    const argv = program(
+      "wrapper",
+      `import { spawn } from "node:child_process"; import { writeFileSync } from "node:fs";
+       const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+       helper.unref(); writeFileSync(${JSON.stringify(helperPid)}, String(helper.pid));
+       process.stdout.write('{"answer":"approve"}\\n');`,
+    );
+    const started = Date.now();
+    try {
+      const result = await nodeSpawn({ drainMs: 150 })(argv, ENV, "{}").done;
+      expect(result).toEqual({ ok: true, stdout: '{"answer":"approve"}\n', stderr: "" });
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(alive(readPid(helperPid))).toBe(true);
+    } finally {
+      if (existsSync(helperPid)) {
+        try {
+          process.kill(readPid(helperPid), "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
+  });
+
+  it("signals the program's whole group while it runs, and never a group whose leader has been reaped", async () => {
+    const leaderFile = join(dir, "leader");
+    const helperFile = join(dir, "helper");
+    const spawnsHelper = `import { spawn } from "node:child_process"; import { writeFileSync } from "node:fs";
+       const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+       helper.unref(); writeFileSync(${JSON.stringify(helperFile)}, String(helper.pid)); writeFileSync(${JSON.stringify(leaderFile)}, String(process.pid));`;
+    const stays = nodeSpawn({ graceMs: 3000 })(program("stays", `${spawnsHelper} setInterval(() => {}, 1000);`), ENV, "{}");
+    await waitFor("the program and its helper", () => existsSync(leaderFile) && readFileSync(leaderFile, "utf8") !== "" && existsSync(helperFile) && readFileSync(helperFile, "utf8") !== "");
+    const helper = readPid(helperFile);
+    expect(alive(helper)).toBe(true);
+    stays.stop("moot");
+    expect(await stays.done).toMatchObject({ ok: false, why: "stopped" });
+    await waitFor("the helper to end with its program", () => !alive(helper), 3000);
+
+    // The program has ended on its own and left the helper: a stop now reaches nobody.
+    rmSync(leaderFile);
+    rmSync(helperFile);
+    const leaves = nodeSpawn({ drainMs: 100 })(program("leaves", `${spawnsHelper} process.stdout.write('{"answer":"approve"}');`), ENV, "{}");
+    try {
+      expect(await leaves.done).toMatchObject({ ok: true });
+      leaves.stop("moot");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(alive(readPid(helperFile))).toBe(true);
+    } finally {
+      try {
+        process.kill(readPid(helperFile), "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  });
+
+  it("tells the program why by the signal: SIGTERM for a moot question, SIGINT when the broker is closing", async () => {
+    const run = async (why: "moot" | "shutdown"): Promise<string> => {
+      const ready = join(dir, `ready-${why}`);
+      const got = join(dir, `got-${why}`);
+      const argv = program(
+        `signals-${why}`,
+        `import { writeFileSync } from "node:fs";
+         for (const name of ["SIGTERM", "SIGINT"]) process.on(name, () => { writeFileSync(${JSON.stringify(got)}, name); process.exit(0); });
+         writeFileSync(${JSON.stringify(ready)}, "1"); setInterval(() => {}, 1000);`,
+      );
+      const child = nodeSpawn({ graceMs: 3000 })(argv, ENV, "{}");
+      await waitFor("the program to run", () => existsSync(ready));
+      child.stop(why);
+      await child.done;
+      return readFileSync(got, "utf8");
+    };
+    expect(await run("moot")).toBe("SIGTERM");
+    expect(await run("shutdown")).toBe("SIGINT");
   });
 
   it("is not brought down by a program that never reads its input", async () => {

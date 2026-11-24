@@ -84,7 +84,11 @@ export type ApprovalRequest = {
   readonly decideBy: number;
 };
 
-export type Answered = { readonly ok: true } | { readonly ok: false; readonly why: "not-found" | "not-held" | "timed-out" };
+/** The only reasons other than a plain no that an approver may give for a refusal. */
+export const REFUSAL_CODES = ["too-long"] as const;
+export type RefusalCode = (typeof REFUSAL_CODES)[number];
+
+export type Answered = { readonly ok: true } | { readonly ok: false; readonly why: "not-found" | "not-held" | "timed-out" | "busy" };
 
 export type Service = {
   readonly productOf: (container: string) => Product | undefined;
@@ -106,7 +110,8 @@ export type Service = {
   readonly outcome: (caller: string, outcome: Outcome) => { readonly applied: boolean };
   readonly approvals: () => readonly ApprovalRequest[];
   readonly approve: (id: string) => Answered;
-  readonly refuse: (id: string) => Answered;
+  /** `reason` is the command approver's own code for why it refused: absent is a person's no. */
+  readonly refuse: (id: string, reason?: RefusalCode) => Answered;
   readonly tick: () => void;
   readonly capabilitiesOf: (container: string) => Capabilities | undefined;
 };
@@ -252,7 +257,13 @@ export function makeService(deps: Deps): Service {
     try {
       if (store.applyIf(id, late ? { kind: "refuse", reason: TIMEOUT } : event, at, current) === null) return { ok: false, why: "not-held" };
     } catch {
-      // Another process (the command line) answered between the read and the write.
+      // Either another process (the command line) answered between the read and the write, or the write was lost to a busy database.
+      // Only the first means the message is not held any more; a yes that is lost must not be taken for it.
+      try {
+        if (store.get(id)?.state === "held") return { ok: false, why: "busy" };
+      } catch {
+        return { ok: false, why: "busy" };
+      }
       return { ok: false, why: "not-held" };
     }
     return late ? { ok: false, why: "timed-out" } : { ok: true };
@@ -430,7 +441,7 @@ export function makeService(deps: Deps): Service {
       })),
 
     approve: (id) => answer(id, { kind: "approve" }),
-    refuse: (id) => answer(id, { kind: "refuse", reason: { kind: "approver", answer: "no" } }),
+    refuse: (id, reason) => answer(id, { kind: "refuse", reason: { kind: "approver", answer: reason ?? "no" } }),
 
     tick: () => {
       const at = now();

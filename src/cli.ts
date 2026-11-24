@@ -15,6 +15,8 @@ export type Io = {
   readonly now: () => number;
   /** The standard input, for `hook`. Absent means empty. */
   readonly stdin?: () => Promise<string>;
+  /** For `approver`: settles when the process is told to stop. Only the program itself installs signal handlers, never a test. */
+  readonly stopped?: () => Promise<"moot" | "shutdown">;
 };
 
 /** Returns the exit code. */
@@ -48,6 +50,7 @@ export async function runCli(argv: readonly string[], env: Readonly<Record<strin
       state: nodeState,
       connect: mcpTools,
       host: hostname(),
+      stopped: io.stopped?.() ?? new Promise(() => undefined),
       now: io.now,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       out: io.out,
@@ -75,6 +78,12 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathS
     err: (line) => process.stderr.write(`${line}\n`),
     now: () => Date.now(),
     stdin: readStdin,
+    // SIGTERM is how the broker says a question is over, SIGINT that it is only shutting down. A handler is set only when asked for.
+    stopped: () =>
+      new Promise((resolve) => {
+        process.once("SIGTERM", () => resolve("moot"));
+        process.once("SIGINT", () => resolve("shutdown"));
+      }),
   }).then((code) => {
     process.exitCode = code;
     // A hook's stdin may stay open after its output; nothing may hold the agent up. The same goes for the short commands
