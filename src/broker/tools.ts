@@ -10,7 +10,7 @@ type AppError = {
   readonly message: string;
 };
 
-const { fail, asAppError } = makeErrorKit<AppError>("agent-gateway");
+const { fail, asAppError } = makeErrorKit<AppError>("elserelay");
 
 const REMEDY: Record<AppError["kind"], string> = {
   forbidden: "this token is not set up for the gateway; ask the operator to add its container to the broker's config",

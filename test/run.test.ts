@@ -137,7 +137,7 @@ async function start(
   over: Partial<RunDeps> = {},
   dir?: string,
 ): Promise<Started> {
-  const d = dir ?? (await mkdtemp(join(tmpdir(), "agw-run-")));
+  const d = dir ?? (await mkdtemp(join(tmpdir(), "elserelay-run-")));
   const path = join(d, "delivered.json");
   const ctl = new AbortController();
   const logs: string[] = [];
@@ -261,7 +261,7 @@ describe("run", () => {
   });
 
   it("does not deliver twice after a restart", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "agw-run-"));
+    const dir = await mkdtemp(join(tmpdir(), "elserelay-run-"));
     await nodeDedupeIo.write(join(dir, "delivered.json"), JSON.stringify({ version: 1, entries: [{ id: "m1", certainty: "accepted" }] }));
     const b = await broker();
     const fake = makeFake({ ...emptyFake, sessions: [s1] });
@@ -277,7 +277,7 @@ describe("run", () => {
   it("writes the id down before it posts the outcome", async () => {
     const b = await broker();
     const fake = makeFake({ ...emptyFake, sessions: [s1] });
-    const dir = await mkdtemp(join(tmpdir(), "agw-run-"));
+    const dir = await mkdtemp(join(tmpdir(), "elserelay-run-"));
     const events: string[] = [];
     const s = await start(b, fake, {
       dedupeIo: {
@@ -453,7 +453,7 @@ describe("run", () => {
     expect(await s.stop()).toEqual({ reason: "stopped" });
     const again = new AbortController();
     again.abort();
-    const dir = await mkdtemp(join(tmpdir(), "agw-run-"));
+    const dir = await mkdtemp(join(tmpdir(), "elserelay-run-"));
     const end = await run(
       { url: b.url, token: TOKEN, driver: fake.driver, dedupePath: join(dir, "d.json"), dedupeIo: nodeDedupeIo, fetch, sleep, now: Date.now, random: () => 0, log: () => undefined, timing: fast },
       again.signal,

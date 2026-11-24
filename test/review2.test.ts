@@ -1,4 +1,4 @@
-/** The fixes from the second review of the broker (foreverworks/agent-gateway#5), one group each. */
+/** The fixes from the second review of the broker (foreverworks/elserelay#5), one group each. */
 import { afterEach, describe, expect, it } from "vitest";
 import { HOP_MEMORY_MS, MAX_INBOX_MESSAGES, MAX_RETURNS } from "../src/broker/service.js";
 import { senderText } from "../src/broker/reasons.js";

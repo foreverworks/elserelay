@@ -127,7 +127,7 @@ describe("dedupe", () => {
   });
 
   it("saves to a file and loads it back, and a missing file is empty", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "agw-dedupe-"));
+    const dir = await mkdtemp(join(tmpdir(), "elserelay-dedupe-"));
     const path = join(dir, "state", "delivered.json");
     expect(await loadDedupe(nodeDedupeIo, path)).toEqual(emptyDedupe);
     const s = remember(emptyDedupe, "a", ok);

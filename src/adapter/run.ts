@@ -250,6 +250,6 @@ export async function run(deps: RunDeps, signal: AbortSignal): Promise<RunEnd> {
   await Promise.allSettled([...inflight]);
   await saving;
   return unauthorized
-    ? { reason: "unauthorized", message: "The broker refused the token (401). Check GATEWAY_TOKEN_FILE: the token may be wrong or revoked." }
+    ? { reason: "unauthorized", message: "The broker refused the token (401). Check ELSERELAY_TOKEN_FILE: the token may be wrong or revoked." }
     : { reason: "stopped" };
 }

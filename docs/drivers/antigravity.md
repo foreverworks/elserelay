@@ -3,6 +3,17 @@
 Read on 2026-11-24 with agy 1.5.16 on Linux x86-64, without a login. What needs
 one is marked unproven.
 
+## Off by default
+
+[Google's Antigravity Additional Terms](https://antigravity.google/terms) say:
+"Using third party software, tools, or services to access the Service (e.g. using
+OpenClaw with Antigravity OAuth) is a breach of this Agreement. Such actions may
+be grounds for suspension or termination of your Antigravity and/or Gemini CLI
+accounts." A hook is a documented feature of the product, and this one signs in
+to nothing, but the sentence is broad enough to cover it and the account at risk
+is yours. So the broker refuses to start with an `antigravity` container unless
+its config says `"allowAntigravity": true`.
+
 ## The choice
 
 The driver uses the documented hook with a mailbox. It does not push and it does
@@ -24,9 +35,9 @@ stdout. Each step has one of these fields:
 `systemMessage` is an object. The page does not say how a hook's exit code is
 read, and says that injected steps stay in the conversation.
 
-`agent-gateway hook antigravity` is the command to register for `SessionStart` and
+`elserelay hook antigravity` is the command to register for `SessionStart` and
 `PreInvocation`. It reads `conversationId` from stdin, calls the broker's
-`POST /adapter/inbox` with `GATEWAY_URL` and the token in `GATEWAY_TOKEN_FILE`,
+`POST /adapter/inbox` with `ELSERELAY_URL` and the token in `ELSERELAY_TOKEN_FILE`,
 and prints one `userMessage` step for each waiting message, or nothing. It has
 three seconds in all, and any failure (no broker, a slow one, a refused token,
 bad stdin) prints nothing and exits 0.

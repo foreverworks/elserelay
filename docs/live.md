@@ -2,7 +2,7 @@
 
 Run on 2026-11-24 with `scripts/live.ts`, against commit 9faf3ec: Claude Code
 2.1.331, Node 26.13.1, `claude-haiku-5-5`, everything on 127.0.0.1. One real
-broker, two real adapters (`GATEWAY_PRODUCT=claude`) and two real Claude Code
+broker, two real adapters (`ELSERELAY_PRODUCT=claude`) and two real Claude Code
 sessions that stayed open for the whole run, plus a sender of the `fake` product
 that stands for a container with no agent in it.
 
@@ -17,11 +17,11 @@ that stands for a container with no agent in it.
 - Each session: `claude -p --model claude-haiku-5-5 --session-id <uuid>
   --input-format stream-json --output-format stream-json --verbose
   --strict-mcp-config --mcp-config <file> --tools "" --allowedTools
-  mcp__gateway__list_peers,mcp__gateway__send,mcp__gateway__inbox,mcp__gateway__reply`,
+  mcp__elserelay__list_peers,mcp__elserelay__send,mcp__elserelay__inbox,mcp__elserelay__reply`,
   started from an empty directory. The MCP file names only this gateway and that
   container's bearer. The `init` event of each session lists exactly those four
   tools and the one MCP server. No Claude setting was changed.
-- Each adapter has `GATEWAY_SESSIONS` set to its own session's id and nothing
+- Each adapter has `ELSERELAY_SESSIONS` set to its own session's id and nothing
   else. The machine holds hundreds of other session records; none was reported or
   reached. Before anything was sent, `list_peers` was read with each token:
   `claude-a` saw only B, `claude-b` saw only A, `probe` saw only B (marked as
@@ -82,7 +82,7 @@ node scripts/live.ts --sessions <new uuid>,<new uuid>
 The two UUIDs are required and are the whole allowlist of the run; without them
 the script refuses to start. It writes `report.txt`, `audit.txt`, each session's
 event stream and the broker and adapter logs to a `run-<time>` folder under
-`--dir` (default `~/.cache/agw/live`), removes the tokens when it ends, stops
+`--dir` (default `~/.cache/elserelay/live`), removes the tokens when it ends, stops
 every process it started and nothing else, and ends if more than `--max-turns`
 (default 25) model turns are taken. It needs Claude Code on the PATH and spends a
 few cents of the model it is given (`--model`).
@@ -113,9 +113,9 @@ and in it all three passed by the script's own checks.
   defaults.
 - The app-server: `codex app-server --listen unix://<path>`, the socket in a folder of
   mode 0700, the home a signed-in `CODEX_HOME` that the script never writes. The gateway
-  is added with `-c mcp_servers.gateway.url=...`, `-c
-  mcp_servers.gateway.bearer_token_env_var=GATEWAY_BEARER` and `-c
-  mcp_servers.gateway.default_tools_approval_mode="approve"`, which makes the gateway's
+  is added with `-c mcp_servers.elserelay.url=...`, `-c
+  mcp_servers.elserelay.bearer_token_env_var=ELSERELAY_BEARER` and `-c
+  mcp_servers.elserelay.default_tools_approval_mode="approve"`, which makes the gateway's
   tools run without approval for this server only. The bearer is in the app-server's
   environment and nowhere else.
 - A first client (the script), which stands for the interactive one, started one
@@ -124,8 +124,8 @@ and in it all three passed by the script's own checks.
   not the point and holds them where it is. A second connection, the observer, only
   initializes. It stands for the adapter's connection: it never resumes the thread and
   never answers anything. Every frame of both is logged with its time.
-- The Codex adapter has `GATEWAY_PRODUCT=codex`, `CODEX_SOCKET` set to that socket and
-  `GATEWAY_SESSIONS` set to the id of that one thread. The Claude adapter has the
+- The Codex adapter has `ELSERELAY_PRODUCT=codex`, `CODEX_SOCKET` set to that socket and
+  `ELSERELAY_SESSIONS` set to the id of that one thread. The Claude adapter has the
   session id given with `--sessions`, as in part one. Other sessions on the machine
   were neither reported nor reached.
 - Before anything was sent, `list_peers` was read with every token: claude-a saw only

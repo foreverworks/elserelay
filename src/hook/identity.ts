@@ -1,5 +1,5 @@
 /**
- * `agent-gateway hook claude` and `agent-gateway hook codex`: a PreToolUse
+ * `elserelay hook claude` and `elserelay hook codex`: a PreToolUse
  * command that fills the `session` argument of the gateway's tools with the
  * session id the product itself reports, so a model cannot mistype it or name
  * another session by accident. What this does and does not guarantee is in
@@ -15,7 +15,7 @@ export type IdentityProduct = "claude" | "codex";
 
 /** The gateway's tools that take a `session`. `list_peers` takes none, so there is nothing to fill in. */
 export const SESSION_TOOLS: readonly string[] = ["send", "inbox", "reply"];
-export const DEFAULT_SERVER = "gateway";
+export const DEFAULT_SERVER = "elserelay";
 /** The longest session id the tools accept (see the `session` argument in src/broker/tools.ts). */
 const MAX_SESSION_CHARS = 200;
 /** A hook's stdin may stay open; the agent is never kept waiting for it. */
@@ -84,7 +84,7 @@ export function decide(product: IdentityProduct, stdin: unknown, server: string)
 
 /** Always returns 0. */
 export async function runIdentityHook(product: IdentityProduct, deps: IdentityDeps): Promise<number> {
-  const server = deps.env.GATEWAY_HOOK_SERVER?.trim() || DEFAULT_SERVER;
+  const server = deps.env.ELSERELAY_HOOK_SERVER?.trim() || DEFAULT_SERVER;
   const text = await stdinWithin(deps.readStdin, deps.timeoutMs ?? STDIN_TIMEOUT_MS);
   const output = decide(product, parse(text), server);
   if (output !== null) deps.out(output);

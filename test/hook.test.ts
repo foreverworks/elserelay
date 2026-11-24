@@ -21,7 +21,7 @@ async function hook(over: Partial<HookDeps> & { readonly stdin?: string }): Prom
   const err: string[] = [];
   const { stdin, ...deps } = over;
   const code = await runAntigravityHook({
-    env: { GATEWAY_URL: "http://127.0.0.1:9", GATEWAY_TOKEN_FILE: "/token" },
+    env: { ELSERELAY_URL: "http://127.0.0.1:9", ELSERELAY_TOKEN_FILE: "/token" },
     readStdin: async () => stdin ?? JSON.stringify({ conversationId: "conv-1" }),
     readFile: async () => "secret-token\n",
     fetch,
@@ -71,7 +71,7 @@ const pullOnly = (a: FakeAdapter, session: string): Promise<number> =>
     sessions: [{ session, title: null, activity: "idle" }],
   });
 
-const withUrl = (url: string): Partial<HookDeps> => ({ env: { GATEWAY_URL: url, GATEWAY_TOKEN_FILE: "/token" } });
+const withUrl = (url: string): Partial<HookDeps> => ({ env: { ELSERELAY_URL: url, ELSERELAY_TOKEN_FILE: "/token" } });
 
 describe("the Antigravity hook", () => {
   it("posts the conversation id with the token and prints each waiting message as an injected user message", async () => {
@@ -184,8 +184,8 @@ describe("the Antigravity hook", () => {
     const s = await stub((respond) => respond(200, '{"messages":["x"]}'));
     for (const over of [
       { env: {} },
-      { env: { GATEWAY_URL: s.url } },
-      { env: { GATEWAY_URL: "not a url", GATEWAY_TOKEN_FILE: "/t" } },
+      { env: { ELSERELAY_URL: s.url } },
+      { env: { ELSERELAY_URL: "not a url", ELSERELAY_TOKEN_FILE: "/t" } },
       { ...withUrl(s.url), readFile: async () => { throw new Error("ENOENT"); } },
       { ...withUrl(s.url), readFile: async () => "  \n" },
     ] satisfies Partial<HookDeps>[]) {
@@ -209,7 +209,7 @@ describe("the Antigravity hook against a real broker", () => {
     const sent = h.running.service.send("beta", { session: "b1", title: "Beta" }, { container: "alpha", session: "conv-1" }, "please look at the build");
     expect(sent.kind).toBe("accepted");
     const url = `http://127.0.0.1:${h.running.adapterPort}`;
-    const env = { GATEWAY_URL: url, GATEWAY_TOKEN_FILE: "/token" };
+    const env = { ELSERELAY_URL: url, ELSERELAY_TOKEN_FILE: "/token" };
     const first = await hook({ env, readFile: async () => TOKENS["alpha"] ?? "" });
     const parsed = JSON.parse(first.out[0] ?? "{}") as { injectSteps: { userMessage: string }[] };
     expect(parsed.injectSteps).toHaveLength(1);
@@ -224,20 +224,20 @@ describe("the Antigravity hook against a real broker", () => {
   it("is refused a token that is not a container's", async () => {
     h = await startHarness({ policy: ALLOW_ALL });
     const url = `http://127.0.0.1:${h.running.adapterPort}`;
-    const run = await hook({ env: { GATEWAY_URL: url, GATEWAY_TOKEN_FILE: "/t" }, readFile: async () => "ghost-token-wrong-0123" });
+    const run = await hook({ env: { ELSERELAY_URL: url, ELSERELAY_TOKEN_FILE: "/t" }, readFile: async () => "ghost-token-wrong-0123" });
     expect(run).toMatchObject({ out: [], code: 0 });
     expect(run.err.join("")).toContain("401");
   });
 });
 
 // The real program, built as `npm run build` builds it, with a real stdin and stdout.
-describe("the agent-gateway program", () => {
+describe("the elserelay program", () => {
   let build: string;
   let work: string;
   beforeAll(() => {
-    work = mkdtempSync(join(tmpdir(), "agw-bin-"));
+    work = mkdtempSync(join(tmpdir(), "elserelay-bin-"));
     // Under node_modules, so the built files find the same packages the sources do.
-    build = join(ROOT, "node_modules", ".cache", `agw-bin-${process.pid}`);
+    build = join(ROOT, "node_modules", ".cache", `elserelay-bin-${process.pid}`);
     execFileSync(join(ROOT, "node_modules", ".bin", "tsc"), ["-p", join(ROOT, "tsconfig.build.json"), "--outDir", build], { cwd: ROOT, stdio: "pipe" });
   }, 120_000);
   afterAll(() => {
@@ -277,7 +277,7 @@ describe("the agent-gateway program", () => {
       const a = await fakeAdapter(h, "alpha");
       await pullOnly(a, "conv-7");
       h.running.service.send("beta", { session: "b1", title: null }, { container: "alpha", session: "conv-7" }, "ping from beta");
-      const env = { GATEWAY_URL: `http://127.0.0.1:${h.running.adapterPort}`, GATEWAY_TOKEN_FILE: tokenFile(TOKENS["alpha"] ?? "") };
+      const env = { ELSERELAY_URL: `http://127.0.0.1:${h.running.adapterPort}`, ELSERELAY_TOKEN_FILE: tokenFile(TOKENS["alpha"] ?? "") };
       const input = JSON.stringify({ conversationId: "conv-7", workspacePaths: [], invocationNum: 0 });
 
       const first = await bin(["hook", "antigravity"], env, input);
@@ -301,11 +301,11 @@ describe("the agent-gateway program", () => {
     await h.close();
     const input = JSON.stringify({ conversationId: "c" });
     const cases: [string, Record<string, string>, string | null][] = [
-      ["no broker", { GATEWAY_URL: url, GATEWAY_TOKEN_FILE: tokenFile("x".repeat(20)) }, input],
-      ["bad stdin", { GATEWAY_URL: url, GATEWAY_TOKEN_FILE: tokenFile("x".repeat(20)) }, "{{{"],
-      ["empty stdin", { GATEWAY_URL: url, GATEWAY_TOKEN_FILE: tokenFile("x".repeat(20)) }, ""],
+      ["no broker", { ELSERELAY_URL: url, ELSERELAY_TOKEN_FILE: tokenFile("x".repeat(20)) }, input],
+      ["bad stdin", { ELSERELAY_URL: url, ELSERELAY_TOKEN_FILE: tokenFile("x".repeat(20)) }, "{{{"],
+      ["empty stdin", { ELSERELAY_URL: url, ELSERELAY_TOKEN_FILE: tokenFile("x".repeat(20)) }, ""],
       ["no settings", {}, input],
-      ["no token file", { GATEWAY_URL: url, GATEWAY_TOKEN_FILE: join(work, "missing") }, input],
+      ["no token file", { ELSERELAY_URL: url, ELSERELAY_TOKEN_FILE: join(work, "missing") }, input],
     ];
     for (const [name, env, stdin] of cases) {
       const run = await bin(["hook", "antigravity"], env, stdin);
@@ -317,7 +317,7 @@ describe("the agent-gateway program", () => {
   it("hook antigravity: a 401 from a live broker prints nothing", async () => {
     const h = await startHarness({ policy: ALLOW_ALL });
     try {
-      const env = { GATEWAY_URL: `http://127.0.0.1:${h.running.adapterPort}`, GATEWAY_TOKEN_FILE: tokenFile("not-a-token-0123456789") };
+      const env = { ELSERELAY_URL: `http://127.0.0.1:${h.running.adapterPort}`, ELSERELAY_TOKEN_FILE: tokenFile("not-a-token-0123456789") };
       const run = await bin(["hook", "antigravity"], env, JSON.stringify({ conversationId: "c" }));
       expect(run).toMatchObject({ code: 0, stdout: "" });
       expect(run.stderr).toContain("401");
@@ -328,7 +328,7 @@ describe("the agent-gateway program", () => {
 
   it("hook antigravity: a broker that never answers costs three seconds and nothing else", async () => {
     const s = await stub(() => undefined);
-    const env = { GATEWAY_URL: s.url, GATEWAY_TOKEN_FILE: tokenFile("x".repeat(20)) };
+    const env = { ELSERELAY_URL: s.url, ELSERELAY_TOKEN_FILE: tokenFile("x".repeat(20)) };
     const run = await bin(["hook", "antigravity"], env, JSON.stringify({ conversationId: "c" }));
     expect(run).toMatchObject({ code: 0, stdout: "" });
     expect(run.ms).toBeGreaterThanOrEqual(2900);
@@ -337,7 +337,7 @@ describe("the agent-gateway program", () => {
 
   it("hook antigravity: does not wait for a stdin that stays open after the JSON", async () => {
     const s = await stub((respond) => respond(200, '{"messages":["hi"]}'));
-    const env = { GATEWAY_URL: s.url, GATEWAY_TOKEN_FILE: tokenFile("x".repeat(20)) };
+    const env = { ELSERELAY_URL: s.url, ELSERELAY_TOKEN_FILE: tokenFile("x".repeat(20)) };
     // The JSON is written but stdin is never ended, so reading to the end would wait for the deadline.
     const run = await new Promise<Result>((resolve) => {
       const started = Date.now();
@@ -353,11 +353,11 @@ describe("the agent-gateway program", () => {
   }, 30_000);
 
   it("hook claude and hook codex: the built program answers from stdin alone, with no settings and no broker", async () => {
-    const input = JSON.stringify({ session_id: "sid-1", tool_name: "mcp__gateway__inbox", tool_input: { received: [] } });
+    const input = JSON.stringify({ session_id: "sid-1", tool_name: "mcp__elserelay__inbox", tool_input: { received: [] } });
     const claude = await bin(["hook", "claude"], {}, input);
     expect(claude).toMatchObject({ code: 0, stderr: "" });
     expect(JSON.parse(claude.stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: { received: [], session: "sid-1" } } });
-    const codex = await bin(["hook", "codex"], { GATEWAY_HOOK_SERVER: "gateway" }, input);
+    const codex = await bin(["hook", "codex"], { ELSERELAY_HOOK_SERVER: "elserelay" }, input);
     expect(JSON.parse(codex.stdout).hookSpecificOutput.permissionDecision).toBe("allow");
     const other = await bin(["hook", "codex"], {}, JSON.stringify({ session_id: "s", tool_name: "Bash", tool_input: { command: "ls" } }));
     expect(other).toMatchObject({ code: 0, stdout: "", stderr: "" });
@@ -369,19 +369,19 @@ describe("the agent-gateway program", () => {
     const run = await bin(["adapter"], {}, null);
     expect(run.code).toBe(2);
     expect(run.stderr).toContain("bad settings");
-    expect(run.stderr).toContain("GATEWAY_URL");
+    expect(run.stderr).toContain("ELSERELAY_URL");
   });
 
   it("an unknown command prints the usage and fails", async () => {
     const run = await bin(["hook", "somewhere-else"], {}, null);
     expect(run.code).toBe(2);
-    expect(run.stderr).toContain("usage: agent-gateway");
+    expect(run.stderr).toContain("usage: elserelay");
   });
 
   it("stop and start show in the audit the program prints", async () => {
     const h = await startHarness({ policy: ALLOW_ALL });
     try {
-      const env = { AGENT_GATEWAY_CONFIG: h.configPath };
+      const env = { ELSERELAY_CONFIG: h.configPath };
       expect((await bin(["stop"], env, null)).code).toBe(0);
       expect((await bin(["start"], env, null)).code).toBe(0);
       const audit = await bin(["audit", "--since", "2020-01-01T00:00:00Z"], env, null);

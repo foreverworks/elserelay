@@ -70,7 +70,7 @@ export const createCodexDriver = (options: CodexOptions): Driver => {
   const connection = createConnection({
     connect: options.connect,
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    clientInfo: { name: "agent-gateway", title: "Agent gateway", version: options.clientVersion ?? "0.0.0" },
+    clientInfo: { name: "elserelay", title: "Elserelay", version: options.clientVersion ?? "0.0.0" },
   });
 
   const readThread = (session: string) => connection.call("thread/read", { threadId: session, includeTurns: false });

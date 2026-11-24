@@ -22,7 +22,7 @@ describe.skipIf(bin === undefined)("the real codex app-server", () => {
   let socket = "";
 
   beforeAll(async () => {
-    dir = await mkdtemp(join(tmpdir(), "agw-codex-real-"));
+    dir = await mkdtemp(join(tmpdir(), "elserelay-codex-real-"));
     socket = join(dir, "app-server.sock");
     await mkdir(join(dir, "home"));
     child = spawn(bin ?? "", ["app-server", "--listen", `unix://${socket}`], {
@@ -47,7 +47,7 @@ describe.skipIf(bin === undefined)("the real codex app-server", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  const open = () => createConnection({ connect: connectUnix(socket), timeoutMs: 10_000, clientInfo: { name: "agw-contract-test", title: null, version: "0.0.0" } });
+  const open = () => createConnection({ connect: connectUnix(socket), timeoutMs: 10_000, clientInfo: { name: "elserelay-contract-test", title: null, version: "0.0.0" } });
 
   it("answers initialize, once", async () => {
     const connection = open();

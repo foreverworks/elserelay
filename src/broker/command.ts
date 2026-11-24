@@ -18,7 +18,7 @@ export const MAX_CHILDREN = 16;
 export const RETRY_FIRST_MS = 30_000;
 export const RETRY_MAX_MS = 300_000;
 export const KILL_GRACE_MS = 5000;
-export const STATE_DIR_VARIABLE = "AGENT_GATEWAY_APPROVER_STATE_DIR";
+export const STATE_DIR_VARIABLE = "ELSERELAY_APPROVER_STATE_DIR";
 
 export type ChildResult =
   | { readonly ok: true; readonly stdout: string; readonly stderr: string }

@@ -1,7 +1,7 @@
 /**
- * `agent-gateway health [url]`: asks the broker's liveness path and exits 0 when
+ * `elserelay health [url]`: asks the broker's liveness path and exits 0 when
  * it answers 200, 1 otherwise. It is for a container's healthcheck, where curl
- * is not installed. The address is the argument, or AGENT_GATEWAY_HEALTH_URL.
+ * is not installed. The address is the argument, or ELSERELAY_HEALTH_URL.
  */
 export type HealthEffects = {
   readonly fetch: (url: string, init: { readonly signal: AbortSignal }) => Promise<{ readonly status: number }>;
@@ -12,9 +12,9 @@ export const HEALTH_TIMEOUT_MS = 3000;
 
 /** Returns the exit code. */
 export async function runHealth(args: readonly string[], env: Readonly<Record<string, string | undefined>>, effects: HealthEffects): Promise<number> {
-  const url = args[0] ?? env["AGENT_GATEWAY_HEALTH_URL"];
+  const url = args[0] ?? env["ELSERELAY_HEALTH_URL"];
   if (args.length > 1 || url === undefined || url === "") {
-    effects.err("usage: agent-gateway health <url>   (or set AGENT_GATEWAY_HEALTH_URL)");
+    effects.err("usage: elserelay health <url>   (or set ELSERELAY_HEALTH_URL)");
     return 2;
   }
   try {

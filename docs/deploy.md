@@ -12,15 +12,15 @@ is based on `node:26-slim`, pinned by digest, and runs as user 10001, so it work
 with a read-only root file system and one writable volume, `/data`.
 
 ```sh
-docker build -t agent-gateway .
+docker build -t elserelay .
 docker run -d --name gateway --init --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
   -v gateway-data:/data \
   -e ELSEWIRE_URL=https://elsewire.example.com/mcp \
   -e ELSEWIRE_TOKEN_FILE=/run/secrets/elsewire-token \
-  -v /etc/agent-gateway/elsewire-token:/run/secrets/elsewire-token:ro \
+  -v /etc/elserelay/elsewire-token:/run/secrets/elsewire-token:ro \
   -p 127.0.0.1:7410:7410 -p 127.0.0.1:7411:7411 \
-  agent-gateway
+  elserelay
 ```
 
 `--init` puts a small init program in front of Node as process 1. The broker
@@ -30,18 +30,18 @@ token mount belong to the Elsewire approver in the configuration example below
 (without that approver, leave them out): the variables are named in `passEnv`,
 and `ELSEWIRE_TOKEN_FILE` is a path inside the container, so the token is mounted
 there, read-only, from a file on the host that user 10001 can read
-(`chown 10001 /etc/agent-gateway/elsewire-token && chmod 400 ...`). The token
+(`chown 10001 /etc/elserelay/elsewire-token && chmod 400 ...`). The token
 itself never goes in an environment variable, a config file or the image.
 
-The image expects `/data/config.json` (the `AGENT_GATEWAY_CONFIG` variable
+The image expects `/data/config.json` (the `ELSERELAY_CONFIG` variable
 points there) and, if the config says so, the tokens and the SQLite file under
 `/data` too. The volume must be writable by user 10001. The admin commands run
 in the same image, so a person answers a held message with
 `docker exec gateway node /app/dist/cli.js approve <id>`.
 
-The image's healthcheck runs `agent-gateway health`, which asks
+The image's healthcheck runs `elserelay health`, which asks
 `http://127.0.0.1:7411/healthz`. If the config uses another adapter port, set
-`AGENT_GATEWAY_HEALTH_URL` on the container to match.
+`ELSERELAY_HEALTH_URL` on the container to match.
 
 ### Reaching the broker from other hosts
 
@@ -56,7 +56,7 @@ interface.
 # 192.0.2.5 stands for the broker host's address on the private network.
 docker run -d --name gateway --init ... \
   -p 192.0.2.5:7410:7410 -p 192.0.2.5:7411:7411 \
-  agent-gateway
+  elserelay
 ```
 
 Inside the container the config binds `listen.host` to `0.0.0.0` (as in the
@@ -68,16 +68,16 @@ name the agents use in `listen.allowedHosts`. Then point each agent's adapter at
 `http://<that name or address>:7410/mcp`.
 
 Without a container: `npm ci && npm run build`, then
-`node dist/cli.js broker --config /etc/agent-gateway/config.json`. Node 26 or
+`node dist/cli.js broker --config /etc/elserelay/config.json`. Node 26 or
 later is required.
 
 ## Health
 
 `GET /healthz` on the adapter port answers `200` and the word `ok` to anyone,
-with no token, and says nothing else: no version, no counts. `agent-gateway
+with no token, and says nothing else: no version, no counts. `elserelay
 health <url>` asks it and exits 0 on a 200 and 1 on anything else, for a
 healthcheck on a machine without curl. With no argument it reads
-`AGENT_GATEWAY_HEALTH_URL`.
+`ELSERELAY_HEALTH_URL`.
 
 What a `200` proves: the process is up, the adapter port is open, and the
 broker's poll loop (the one that expires, retries, asks approvers and pushes) has
@@ -91,7 +91,7 @@ delivered. Those are visible in `list_peers` and in the log.
 
 ## Configuration
 
-A JSON file, named by `--config` or by `AGENT_GATEWAY_CONFIG`. An unknown key is
+A JSON file, named by `--config` or by `ELSERELAY_CONFIG`. An unknown key is
 an error, and an error message lists the problems without quoting the file.
 
 | Key | Meaning | Default |
@@ -106,6 +106,7 @@ an error, and an error message lists the problems without quoting the file.
 | `deliveryTimeoutMs` | How long a handed-out message may wait for its outcome before it goes back to the queue. At most 7 days. | `60000` |
 | `pollMs` | How often the broker expires, retries, asks for approvals and pushes what waits. At most 7 days. | `1000` |
 | `approver` | Who is asked about a held message, besides the command line: `{ "kind": "cli" }` or `{ "kind": "command", ... }`, see below. | `{ "kind": "cli" }` |
+| `allowAntigravity` | Must be `true` for a container with the product `antigravity`; without it the broker does not start. Google's terms forbid third party software on Antigravity, see the README. | `false` |
 | `policy.rules` | Rules in order, the first match decides, no match is a refusal. Each is `{ name, from, to, decision, wake? }`. `from` and `to` match on `container` and `product`, both optional. `decision` is `allow`, `deny` or `ask`. `wake: true` lets a message wake a cold session. A rule may only name containers that are in `containers`. | `[]` |
 | `policy.limits.maxHops` | Replies in a thread before a message is refused. | `6` |
 | `policy.limits.rate` | `{ messages, windowMs }`: messages per pair of containers in a sliding window. | `20` per `3600000` |
@@ -120,11 +121,11 @@ The `approver` section, when it is a command:
 | Key | Meaning | Default |
 |---|---|---|
 | `argv` | The program and its arguments, at least one. Started directly, never through a shell. | required |
-| `stateDir` | A directory the command may keep state in. The broker only passes its path, as `AGENT_GATEWAY_APPROVER_STATE_DIR`; the command creates and uses it. | none |
+| `stateDir` | A directory the command may keep state in. The broker only passes its path, as `ELSERELAY_APPROVER_STATE_DIR`; the command creates and uses it. | none |
 | `passEnv` | Names of variables of the broker's own environment that the command may see. The command also gets `PATH`, `HOME` and `LANG`, and nothing else. | `[]` |
 
 A complete example for a broker in a container, with two agent containers and
-one that only reads:
+a third one that may be written to only after a person agrees:
 
 ```json
 {
@@ -139,7 +140,7 @@ one that only reads:
   "containers": {
     "build-box": { "product": "claude" },
     "review-box": { "product": "codex" },
-    "notes-box": { "product": "antigravity" }
+    "notes-box": { "product": "claude" }
   },
   "deliveryTimeoutMs": 60000,
   "pollMs": 1000,
@@ -193,11 +194,11 @@ adapter port. Its settings come from the environment:
 
 | Variable | Meaning |
 |---|---|
-| `GATEWAY_URL` | The broker's adapter address, such as `http://gateway.internal.example:7411`. |
-| `GATEWAY_TOKEN_FILE` | A file holding this container's token. |
-| `GATEWAY_PRODUCT` | `claude`, `codex`, `antigravity`, or `fake` for a try-out. Must match the product the broker's config binds to this token's label. |
-| `GATEWAY_STATE_DIR` | Where the adapter keeps the ids it has delivered. Must survive a restart. |
-| `GATEWAY_SESSIONS` | Optional. Session ids separated by commas or spaces: the only sessions this adapter reports and delivers to. Unset means every session; set but empty is an error. |
+| `ELSERELAY_URL` | The broker's adapter address, such as `http://gateway.internal.example:7411`. |
+| `ELSERELAY_TOKEN_FILE` | A file holding this container's token. |
+| `ELSERELAY_PRODUCT` | `claude`, `codex`, `antigravity`, or `fake` for a try-out. Must match the product the broker's config binds to this token's label. |
+| `ELSERELAY_STATE_DIR` | Where the adapter keeps the ids it has delivered. Must survive a restart. |
+| `ELSERELAY_SESSIONS` | Optional. Session ids separated by commas or spaces: the only sessions this adapter reports and delivers to. Unset means every session; set but empty is an error. |
 | `CODEX_SOCKET`, `CODEX_HOME` | Codex only: the app-server's control socket, or the folder it is under (default `~/.codex`). |
 | `ANTIGRAVITY_SUMMARIES_DB` | Antigravity only: the CLI's `conversation_summaries.db`. |
 
@@ -215,9 +216,9 @@ sessions, or make its unit join that service's mount namespace with
 `PrivateTmp=yes`.
 
 ```ini
-# /etc/systemd/system/agent-gateway-adapter.service
+# /etc/systemd/system/elserelay-adapter.service
 [Unit]
-Description=agent-gateway adapter for Claude Code
+Description=elserelay adapter for Claude Code
 After=network-online.target claude-sessions.service
 Wants=network-online.target
 # Share the private /tmp of the service that runs the Claude Code sessions.
@@ -228,13 +229,13 @@ JoinsNamespaceOf=claude-sessions.service
 [Service]
 User=agent
 PrivateTmp=yes
-LoadCredential=token:/etc/agent-gateway/token-build-box
-StateDirectory=agent-gateway-adapter
-Environment=GATEWAY_URL=http://gateway.internal.example:7411
-Environment=GATEWAY_PRODUCT=claude
-Environment=GATEWAY_TOKEN_FILE=%d/token
-Environment=GATEWAY_STATE_DIR=%S/agent-gateway-adapter
-ExecStart=/usr/bin/node /opt/agent-gateway/dist/cli.js adapter
+LoadCredential=token:/etc/elserelay/token-build-box
+StateDirectory=elserelay-adapter
+Environment=ELSERELAY_URL=http://gateway.internal.example:7411
+Environment=ELSERELAY_PRODUCT=claude
+Environment=ELSERELAY_TOKEN_FILE=%d/token
+Environment=ELSERELAY_STATE_DIR=%S/elserelay-adapter
+ExecStart=/usr/bin/node /opt/elserelay/dist/cli.js adapter
 Restart=on-failure
 RestartSec=5
 
@@ -251,7 +252,7 @@ is open and `serving` with the sessions it reads when it starts.
 ## The approver
 
 With the default, `cli`, a held message waits for
-`agent-gateway approvals`, then `approve <id>` or `refuse <id>`, and is refused
+`elserelay approvals`, then `approve <id>` or `refuse <id>`, and is refused
 when `policy.limits.approvalTtlMs` runs out. The command approver adds a program
 that answers for you; the command line keeps working beside it. The contract is
 in [design.md](design.md#the-command-contract).
@@ -274,7 +275,7 @@ The person is shown the text the receiving session will be handed, the
 gateway's header with the sender's claimed session title and then the body, inside
 a code fence, so no formatting in it can hide a part of it from the person who
 decides and nothing is delivered that was not shown. The request says it comes
-from `agent-gateway`, with the message's thread as its session, and allows no
+from `elserelay`, with the message's thread as its session, and allows no
 note. A message too long for that (4000 characters in all, the header about 900 of
 them) is refused with the reason `too-long`, which the sender reads as "too long
 for a person to approve", not as a person's no: this is why `maxBodyChars` should

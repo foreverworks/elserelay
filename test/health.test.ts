@@ -62,7 +62,7 @@ describe("GET /healthz", () => {
   });
 });
 
-describe("agent-gateway health", () => {
+describe("elserelay health", () => {
   const io = () => {
     const err: string[] = [];
     return { err, effects: (status: number | Error) => ({ fetch: () => (status instanceof Error ? Promise.reject(status) : Promise.resolve({ status })), err: (l: string) => err.push(l) }) };
@@ -80,7 +80,7 @@ describe("agent-gateway health", () => {
     const rig = io();
     let asked = "";
     const effects = { fetch: (url: string) => ((asked = url), Promise.resolve({ status: 200 })), err: () => undefined };
-    expect(await runHealth([], { AGENT_GATEWAY_HEALTH_URL: "http://env/healthz" }, effects)).toBe(0);
+    expect(await runHealth([], { ELSERELAY_HEALTH_URL: "http://env/healthz" }, effects)).toBe(0);
     expect(asked).toBe("http://env/healthz");
     expect(await runHealth([], {}, rig.effects(200))).toBe(2);
     expect(await runHealth(["a", "b"], {}, rig.effects(200))).toBe(2);

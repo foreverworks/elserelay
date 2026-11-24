@@ -1,4 +1,4 @@
-/** The fixes from the independent review of the broker (foreverworks/agent-gateway#5), one group each. */
+/** The fixes from the independent review of the broker (foreverworks/elserelay#5), one group each. */
 import { afterEach, describe, expect, it } from "vitest";
 import { makeService } from "../src/broker/service.js";
 import type { Service } from "../src/broker/service.js";

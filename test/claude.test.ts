@@ -23,7 +23,7 @@ type Rig = {
 const servers: Server[] = [];
 
 async function rig(): Promise<Rig> {
-  const root = await mkdtemp(join(tmpdir(), "agw-claude-"));
+  const root = await mkdtemp(join(tmpdir(), "elserelay-claude-"));
   const dir = join(root, "sessions");
   const sockets = join(root, "socks");
   await mkdir(dir);
@@ -154,7 +154,7 @@ describe("claude driver: deliver", () => {
     const result = await createClaudeDriver(r.env).deliver(id, "hello\nthere");
     expect(result).toEqual({ ok: true, certainty: "accepted" });
     expect(r.received.join("")).toBe(
-      `${JSON.stringify({ type: "user", message: { role: "user", content: "hello\nthere" }, from: "agent-gateway" })}\n`,
+      `${JSON.stringify({ type: "user", message: { role: "user", content: "hello\nthere" }, from: "elserelay" })}\n`,
     );
     expect(r.received.join("").split("\n")).toHaveLength(2);
   });

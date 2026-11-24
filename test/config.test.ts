@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import { loadConfig, parseConfig } from "../src/broker/config.js";
 
 const base = {
-  store: "/var/lib/agw/broker.sqlite",
-  tokensDir: "/run/agw/tokens",
+  store: "/var/lib/elserelay/broker.sqlite",
+  tokensDir: "/run/elserelay/tokens",
   listen: { mcpPort: 7410, adapterPort: 7411 },
   containers: { alpha: { product: "claude" }, beta: { product: "codex" } },
 };
@@ -73,8 +73,8 @@ describe("the approver section", () => {
   });
 
   it("takes a command with its arguments, an optional state directory and the names to pass through", () => {
-    const r = withApprover({ kind: "command", argv: ["agent-gateway", "approver", "elsewire"], stateDir: "/data/approver", passEnv: ["ELSEWIRE_URL"] });
-    expect(r.ok && r.config.approver).toEqual({ kind: "command", argv: ["agent-gateway", "approver", "elsewire"], stateDir: "/data/approver", passEnv: ["ELSEWIRE_URL"] });
+    const r = withApprover({ kind: "command", argv: ["elserelay", "approver", "elsewire"], stateDir: "/data/approver", passEnv: ["ELSEWIRE_URL"] });
+    expect(r.ok && r.config.approver).toEqual({ kind: "command", argv: ["elserelay", "approver", "elsewire"], stateDir: "/data/approver", passEnv: ["ELSEWIRE_URL"] });
     const bare = withApprover({ kind: "command", argv: ["/usr/local/bin/ask"] });
     expect(bare.ok && bare.config.approver).toEqual({ kind: "command", argv: ["/usr/local/bin/ask"], passEnv: [] });
   });
@@ -91,7 +91,7 @@ describe("the approver section", () => {
 
 describe("loadConfig", () => {
   it("reads a file, and an error lists the problems without quoting the file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "agw-config-"));
+    const dir = mkdtempSync(join(tmpdir(), "elserelay-config-"));
     try {
       const good = join(dir, "good.json");
       writeFileSync(good, JSON.stringify(base));
@@ -107,6 +107,24 @@ describe("loadConfig", () => {
   });
 });
 
+describe("antigravity", () => {
+  const withAgy = { ...base, containers: { ...base.containers, agy: { product: "antigravity" } } };
+
+  it("is off unless the config says it out loud", () => {
+    const off = parseConfig(withAgy);
+    expect(off.ok).toBe(false);
+    if (!off.ok) expect(off.problems).toEqual([expect.stringMatching(/^containers\.agy: antigravity is off unless allowAntigravity/)]);
+    const refused = parseConfig({ ...withAgy, allowAntigravity: "yes" });
+    expect(refused.ok).toBe(false);
+  });
+
+  it("is accepted with allowAntigravity", () => {
+    const on = parseConfig({ ...withAgy, allowAntigravity: true });
+    if (!on.ok) throw new Error(on.problems.join("; "));
+    expect(on.config.products.get("agy")).toBe("antigravity");
+  });
+});
+
 describe("docs/deploy.md", () => {
   it("has a complete example that the broker accepts", () => {
     const doc = readFileSync(new URL("../docs/deploy.md", import.meta.url), "utf8");
@@ -115,6 +133,6 @@ describe("docs/deploy.md", () => {
     const r = parseConfig(JSON.parse(example ?? ""));
     if (!r.ok) throw new Error(r.problems.join("; "));
     expect(r.config.approver.kind).toBe("command");
-    expect(r.config.products.get("notes-box")).toBe("antigravity");
+    expect(r.config.products.get("notes-box")).toBe("claude");
   });
 });

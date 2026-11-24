@@ -13,7 +13,7 @@ const approverConfig = z.discriminatedUnion("kind", [
     kind: z.literal("command"),
     /** The program and its arguments. Started directly, never through a shell. */
     argv: z.array(z.string().min(1)).min(1),
-    /** Handed to the command as AGENT_GATEWAY_APPROVER_STATE_DIR, for what it keeps between runs. */
+    /** Handed to the command as ELSERELAY_APPROVER_STATE_DIR, for what it keeps between runs. */
     stateDir: z.string().min(1).optional(),
     /** Names of variables of the broker's own environment that the command may see, besides PATH, HOME and LANG. */
     passEnv: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
@@ -41,6 +41,8 @@ const config = z.strictObject({
   /** Who answers a held message besides the command line. Default: only the command line. */
   approver: approverConfig.default({ kind: "cli" }),
   policy: z.unknown().default({}),
+  /** Google's terms forbid third party software on Antigravity, so a container that runs it needs this said out loud. */
+  allowAntigravity: z.boolean().default(false),
 });
 
 export type ApproverConfig =
@@ -98,6 +100,14 @@ export function parseConfig(json: unknown): Parsed {
       }
     }
   });
+  // A policy, not a technical limit: see README.md, "Terms of the providers".
+  if (!parsed.data.allowAntigravity) {
+    for (const [label, product] of products) {
+      if (product === "antigravity") {
+        problems.push(`containers.${label}: antigravity is off unless allowAntigravity is true; read the provider's terms first`);
+      }
+    }
+  }
   if (problems.length > 0) return { ok: false, problems };
 
   const { listen } = parsed.data;

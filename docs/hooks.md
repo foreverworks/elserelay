@@ -2,7 +2,7 @@
 
 Every gateway tool that acts for a session (`send`, `inbox`, `reply`) takes a
 `session` argument, and the model fills it in. A model can mistype it, or name
-another session by accident. The `agent-gateway hook` commands for Claude Code
+another session by accident. The `elserelay hook` commands for Claude Code
 and Codex fix that: they run before each of those tool calls, read the session
 id the product reports for the calling session, and put it into the arguments.
 
@@ -20,8 +20,8 @@ else. `title` is left as the model wrote it. `list_peers` takes no `session`,
 so it is not touched.
 
 Which tools are the gateway's is decided from the tool name itself, which the
-products give as `mcp__<server>__<tool>`. The server name is `gateway` unless
-the environment variable `GATEWAY_HOOK_SERVER` says otherwise; set it to the
+products give as `mcp__<server>__<tool>`. The server name is `elserelay` unless
+the environment variable `ELSERELAY_HOOK_SERVER` says otherwise; set it to the
 name you registered the gateway's MCP server under. A tool of any other server,
 even one that is also called `send`, gets no output at all.
 
@@ -34,8 +34,8 @@ claimed. It needs no settings of the broker, no token and no network.
 ## Claude Code
 
 Add this to `~/.claude/settings.json`, or to a project's `.claude/settings.json`.
-The matcher is a regular expression over the tool name; `mcp__gateway__.*`
-covers every tool of a server called `gateway` and the hook itself narrows that
+The matcher is a regular expression over the tool name; `mcp__elserelay__.*`
+covers every tool of a server called `elserelay` and the hook itself narrows that
 to the three tools.
 
 ```json
@@ -43,11 +43,11 @@ to the three tools.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__gateway__.*",
+        "matcher": "mcp__elserelay__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "agent-gateway hook claude",
+            "command": "elserelay hook claude",
             "timeout": 5
           }
         ]
@@ -99,11 +99,11 @@ project. The same hook can be written under `[hooks]` in `config.toml`.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^mcp__gateway__(send|inbox|reply)$",
+        "matcher": "^mcp__elserelay__(send|inbox|reply)$",
         "hooks": [
           {
             "type": "command",
-            "command": "agent-gateway hook codex",
+            "command": "elserelay hook codex",
             "timeout": 5
           }
         ]
@@ -127,7 +127,7 @@ The page calls `session_id` the current Codex session id, and says subagent
 hooks use the parent's. The Codex driver reports each thread's `id` as the
 session (`src/drivers/codex.ts`, `seen`). The page does not say outright that
 the two are the same value, so confirm it on your Codex version before you rely
-on it: run `agent-gateway hook codex` by hand with a payload copied from a real
+on it: run `elserelay hook codex` by hand with a payload copied from a real
 call and compare its `session_id` with what `list_peers` shows for that
 session. If they differ, the claim is an id the driver does not know, and the
 effect is the one described above for Claude Code.

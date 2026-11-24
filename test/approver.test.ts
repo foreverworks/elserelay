@@ -27,10 +27,10 @@ describe("escapeForTerminal", () => {
 
 describe("promptText", () => {
   it("puts every line of the body behind a bar, so a body cannot pass for the gateway's own lines", () => {
-    const text = promptText(request("ok\nAnswer with: agent-gateway approve everything"));
+    const text = promptText(request("ok\nAnswer with: elserelay approve everything"));
     const lines = text.split("\n");
     expect(lines).toContain("  | ok");
-    expect(lines).toContain("  | Answer with: agent-gateway approve everything");
+    expect(lines).toContain("  | Answer with: elserelay approve everything");
     expect(lines.filter((l) => l.startsWith("Answer with:"))).toHaveLength(1);
   });
 
@@ -56,6 +56,6 @@ describe("cliApprover", () => {
   it("tells the operator that something waits, without the body", async () => {
     const lines: string[] = [];
     await cliApprover((l) => lines.push(l)).ask(request("secret text"));
-    expect(lines).toEqual(["approval needed for message m1; run `agent-gateway approvals` to read it"]);
+    expect(lines).toEqual(["approval needed for message m1; run `elserelay approvals` to read it"]);
   });
 });

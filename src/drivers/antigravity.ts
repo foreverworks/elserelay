@@ -1,7 +1,7 @@
 /**
  * Antigravity. A conversation cannot be pushed to, so this driver only lists:
  * the conversations come from the CLI's summary database, read-only, and a
- * message reaches one through the hook's pull (`agent-gateway hook antigravity`).
+ * message reaches one through the hook's pull (`elserelay hook antigravity`).
  * Why is in docs/drivers/antigravity.md.
  *
  * The database is not a documented contract. Whatever is wrong with it (the

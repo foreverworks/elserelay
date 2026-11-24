@@ -30,7 +30,7 @@ const text = (json: unknown) => ({ content: [{ type: "text" as const, text: JSON
 
 /** An Elsewire as the approver sees it: two tools of a real MCP server over streamable HTTP, behind a bearer token. */
 export async function fakeElsewire(): Promise<FakeElsewire> {
-  const dir = mkdtempSync(join(tmpdir(), "agw-elsewire-"));
+  const dir = mkdtempSync(join(tmpdir(), "elserelay-elsewire-"));
   const tokens = join(dir, "tokens");
   mkdirSync(tokens);
   writeFileSync(join(tokens, "token-approver"), TOKEN);

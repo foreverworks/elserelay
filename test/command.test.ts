@@ -52,7 +52,7 @@ describe("childEnv", () => {
   });
 
   it("tells the command where to keep its state when the config names a directory", () => {
-    expect(childEnv({ PATH: "/bin" }, [], "/data/approver")).toEqual({ PATH: "/bin", AGENT_GATEWAY_APPROVER_STATE_DIR: "/data/approver" });
+    expect(childEnv({ PATH: "/bin" }, [], "/data/approver")).toEqual({ PATH: "/bin", ELSERELAY_APPROVER_STATE_DIR: "/data/approver" });
   });
 });
 

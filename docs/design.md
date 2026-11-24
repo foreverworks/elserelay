@@ -26,7 +26,7 @@ whether it may go, who it came from, and whether a person has to say yes first.
 - **One broker**, in a container of its own. It never connects to an agent.
 - **One adapter per agent container**, beside the CLI, never in front of it. It
   dials out to the broker, reports the sessions it sees, and delivers messages
-  through a driver. `GATEWAY_SESSIONS`, a list of session ids separated by commas
+  through a driver. `ELSERELAY_SESSIONS`, a list of session ids separated by commas
   or spaces, is optional: when it is set the adapter reports only those sessions
   and refuses a delivery to any other with `retry: false`, whatever the broker
   asks. Unset means every session; set but empty is an error, so a value lost on
@@ -42,7 +42,7 @@ whether it may go, who it came from, and whether a person has to say yes first.
 - **Agents speak MCP to the broker**: `list_peers`, `send`, `inbox`, `reply`. A
   new product needs a driver and an MCP registration, nothing else.
 - **A product that cannot be pushed to** has a hook instead. The hook runs
-  `agent-gateway hook <product>`, which asks the broker for the session's waiting
+  `elserelay hook <product>`, which asks the broker for the session's waiting
   messages (`POST /adapter/inbox`, with the container's token, the same service
   call as the MCP `inbox`) and prints them in the product's own format. Once its
   output is written it confirms the messages with a second request to the same
@@ -67,7 +67,7 @@ by the broker's config, not by what an adapter reports: a token whose label the
 config does not list, or a report naming another product than its container's,
 is refused with a 403.
 
-An optional PreToolUse hook (`agent-gateway hook claude` or `hook codex`, in
+An optional PreToolUse hook (`elserelay hook claude` or `hook codex`, in
 docs/hooks.md) fills the `session` argument of the gateway's tools with the id
 the product itself reports for the calling session. That makes the claim right
 by default, so a model cannot mistype it or name another session by accident.
@@ -222,7 +222,7 @@ The config picks the approver in `approver`. The command line is always there,
 beside whatever else is configured.
 
 - **`cli`**, the default. It logs that a message waits, without its text. A
-  person reads it with `agent-gateway approvals` and answers with `approve` or
+  person reads it with `elserelay approvals` and answers with `approve` or
   `refuse`.
 - **`command`**. The broker runs a program of the operator's for each held
   message and takes its answer. This is how a deployment plugs in a phone
@@ -253,7 +253,7 @@ it, and reads its standard output.
 times are milliseconds since the epoch. `title` is null when the session has
 none. The container is the one the sender's token proves, the session and the title
 are the sender's claim, and `body` is untrusted: show it
-to a person escaped, as `agent-gateway approvals` does (`escapeForTerminal` in
+to a person escaped, as `elserelay approvals` does (`escapeForTerminal` in
 `src/broker/approver.ts`), never as markup or as something to run.
 
 What a yes delivers is not the body alone: the receiving session is handed the
@@ -263,7 +263,7 @@ header is built by `render` in `src/core/render.ts` from exactly the fields of
 this request, and it never changes after the message is sent (the title is the
 one the sender claimed when it sent the message, kept with the message, not read
 again from the peer's report). An approver that wants a person to approve what is
-delivered should show that text, as `agent-gateway approvals` does with the
+delivered should show that text, as `elserelay approvals` does with the
 title and the elsewire command does with the whole text.
 
 The program answers with exactly one JSON value on standard output and exit
@@ -314,7 +314,7 @@ again after 250 ms, 500 ms, 1 s and 2 s, and only then counts it as no answer
 wait for a free place in the order they were held.
 
 The program's environment is `PATH`, `HOME` and `LANG` of the broker's own, the
-variables named in the config's `passEnv`, and `AGENT_GATEWAY_APPROVER_STATE_DIR`
+variables named in the config's `passEnv`, and `ELSERELAY_APPROVER_STATE_DIR`
 when the config sets `stateDir`. Nothing else of the broker's environment
 reaches it, so a secret the broker holds stays with the broker. The program
 runs in the broker's working directory.
@@ -330,7 +330,7 @@ ready-made command below does that.
 
 ### Asking through Elsewire
 
-`agent-gateway approver elsewire` is a command for the contract above. It asks
+`elserelay approver elsewire` is a command for the contract above. It asks
 a person through an Elsewire server, an MCP server over streamable HTTP with
 bearer authentication, and needs `ELSEWIRE_URL`, `ELSEWIRE_TOKEN_FILE` and
 `ELSEWIRE_STATE_DIR`.

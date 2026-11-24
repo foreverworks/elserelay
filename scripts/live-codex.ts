@@ -11,7 +11,7 @@
  * side allows the one thread this script creates. Neither adapter reports or reaches any other session,
  * and the run stops before it sends anything if a peer list shows anything else.
  *
- * The app-server gets the gateway through `-c mcp_servers.gateway...` arguments and the bearer through
+ * The app-server gets the gateway through `-c mcp_servers.elserelay...` arguments and the bearer through
  * its environment, so the config file of `--codex-home` is never written. Tokens live in files of mode
  * 0600 and are never put in an argument list or a log. Only processes this script started are signalled.
  * It needs Node 26 (it runs TypeScript as it is).
@@ -84,7 +84,7 @@ function readOptions(argv: readonly string[]): Options | string {
   if (only.some((n) => !Number.isInteger(n) || n < 1 || n > 8)) return `--only takes scenario numbers from 1 to 8, separated by commas\n${USAGE}`;
   return {
     a: id,
-    dir: resolve(values.dir ?? join(homedir(), ".cache", "agw", "live")),
+    dir: resolve(values.dir ?? join(homedir(), ".cache", "elserelay", "live")),
     maxTurns,
     model: values.model ?? "claude-haiku-5-5",
     claude: values.claude ?? "claude",
@@ -185,11 +185,11 @@ async function main(options: Options): Promise<number> {
       socketDir: join(dir, "socket"),
       cwd: work,
       config: [
-        ["mcp_servers.gateway.url", JSON.stringify(`http://127.0.0.1:${mcpPort}/mcp`)],
-        ["mcp_servers.gateway.bearer_token_env_var", '"GATEWAY_BEARER"'],
-        ["mcp_servers.gateway.default_tools_approval_mode", '"approve"'],
+        ["mcp_servers.elserelay.url", JSON.stringify(`http://127.0.0.1:${mcpPort}/mcp`)],
+        ["mcp_servers.elserelay.bearer_token_env_var", '"ELSERELAY_BEARER"'],
+        ["mcp_servers.elserelay.default_tools_approval_mode", '"approve"'],
       ],
-      env: { GATEWAY_BEARER: tokenOf("codex-b") },
+      env: { ELSERELAY_BEARER: tokenOf("codex-b") },
       log: join(dir, "app-server.log"),
       children,
     });
@@ -226,7 +226,7 @@ async function main(options: Options): Promise<number> {
     report.line(
       `codex thread: model ${String(started.result["model"])}, effort ${String(started.result["reasoningEffort"])}, approval ${JSON.stringify(started.result["approvalPolicy"])}, sandbox ${JSON.stringify(record(started.result["sandbox"])?.["type"])}`,
     );
-    const mcpStatus = await first.rpc("mcpServerStatus/list", { serverName: "gateway", threadId });
+    const mcpStatus = await first.rpc("mcpServerStatus/list", { serverName: "elserelay", threadId });
     report.line(`codex sees the gateway MCP server: ${oneLine(JSON.stringify(mcpStatus.ok ? mcpStatus.result : mcpStatus.error), 300)}`);
 
     // The observer: a second connection as the driver's would be. It initializes, never resumes and never answers.
@@ -338,7 +338,7 @@ async function main(options: Options): Promise<number> {
       const ca = idsBetween(rows, "codex-b", "claude-a");
       const ac = idsBetween(rows, "claude-a", "codex-b");
       const second = itemsOf(first, threadId, "userMessage").at(-1);
-      const gotHeader = JSON.stringify(second ?? {}).includes("delivered through the agent gateway");
+      const gotHeader = JSON.stringify(second ?? {}).includes("delivered through the Elserelay");
       // Codex may also answer A's answer with a reply of its own, so more than one message can go from it to A.
       const ok = ca.length >= 1 && ac.length === 1 && ca.every((id) => finalState(rows, id) === "delivered") && finalState(rows, ac[0] as string) === "delivered" && /51/.test(sayings(first, threadId).slice(said0).join(" "));
       return {

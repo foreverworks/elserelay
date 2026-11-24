@@ -34,7 +34,7 @@ export async function startHarness(options: {
   /** A directory that outlives the broker, for a test that starts a second broker on the same store; the harness does not remove it. */
   readonly dir?: string;
 }): Promise<Harness> {
-  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "agw-"));
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "elserelay-"));
   const tokensDir = join(dir, "tokens");
   mkdirSync(tokensDir, { recursive: true });
   for (const [label, token] of Object.entries(TOKENS)) writeFileSync(join(tokensDir, `token-${label}`), token);

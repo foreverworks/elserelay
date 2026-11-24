@@ -12,8 +12,8 @@ RUN npm run build
 
 FROM ${NODE_IMAGE}
 ENV NODE_ENV=production \
-    AGENT_GATEWAY_CONFIG=/data/config.json \
-    AGENT_GATEWAY_HEALTH_URL=http://127.0.0.1:7411/healthz
+    ELSERELAY_CONFIG=/data/config.json \
+    ELSERELAY_HEALTH_URL=http://127.0.0.1:7411/healthz
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force

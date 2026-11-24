@@ -45,18 +45,18 @@ export function promptText(request: ApprovalRequest): string {
     `  answer by: ${isoTime(request.decideBy)}`,
     `  text:`,
     ...body,
-    `Answer with: agent-gateway approve ${request.id}   or   agent-gateway refuse ${request.id}`,
+    `Answer with: elserelay approve ${request.id}   or   elserelay refuse ${request.id}`,
   ].join("\n");
 }
 
 /**
  * The default approver: it tells the operator on stderr that something waits and
- * leaves the text for `agent-gateway approvals`, so a message body never lands in a journal.
+ * leaves the text for `elserelay approvals`, so a message body never lands in a journal.
  */
 export function cliApprover(log: (line: string) => void): Approver {
   return {
     ask: (request) => {
-      log(`approval needed for message ${request.id}; run \`agent-gateway approvals\` to read it`);
+      log(`approval needed for message ${request.id}; run \`elserelay approvals\` to read it`);
       return Promise.resolve();
     },
   };

@@ -37,7 +37,7 @@ export type FakeServer = {
 export const notInitialized = { error: { code: -32600, message: "Not initialized" } } as const;
 
 export const startFakeServer = async (handlers: Readonly<Record<string, Handler>>): Promise<FakeServer> => {
-  const dir = await mkdtemp(join(tmpdir(), "agw-codex-"));
+  const dir = await mkdtemp(join(tmpdir(), "elserelay-codex-"));
   const path = join(dir, "app-server.sock");
   const http: Server = createServer();
   const wss = new WebSocketServer({ server: http });

@@ -1,11 +1,11 @@
 /**
- * The adapter's entry point, run as `agent-gateway adapter`. Settings come from
+ * The adapter's entry point, run as `elserelay adapter`. Settings come from
  * the environment only:
- *   GATEWAY_URL         the broker's address
- *   GATEWAY_TOKEN_FILE  a file holding the container's bearer token
- *   GATEWAY_PRODUCT     claude, codex, antigravity, or fake for a try-out
- *   GATEWAY_STATE_DIR   where the delivered ids are kept
- *   GATEWAY_SESSIONS    optional, session ids separated by commas or spaces: the only sessions this adapter reports and delivers to.
+ *   ELSERELAY_URL         the broker's address
+ *   ELSERELAY_TOKEN_FILE  a file holding the container's bearer token
+ *   ELSERELAY_PRODUCT     claude, codex, antigravity, or fake for a try-out
+ *   ELSERELAY_STATE_DIR   where the delivered ids are kept
+ *   ELSERELAY_SESSIONS    optional, session ids separated by commas or spaces: the only sessions this adapter reports and delivers to.
  *                       Unset means every session; set but empty is an error, so a lost value never widens the list
  *   CODEX_SOCKET        codex only: the app-server's control socket
  *                       (default: $CODEX_HOME/app-server-control/app-server-control.sock)
@@ -29,11 +29,11 @@ import { defaultTiming, run } from "./run.js";
 const PRODUCTS = ["claude", "codex", "antigravity", "fake"] as const;
 
 const env = z.object({
-  GATEWAY_URL: z.url(),
-  GATEWAY_TOKEN_FILE: z.string().min(1),
-  GATEWAY_PRODUCT: z.enum(PRODUCTS),
-  GATEWAY_STATE_DIR: z.string().min(1),
-  GATEWAY_SESSIONS: z
+  ELSERELAY_URL: z.url(),
+  ELSERELAY_TOKEN_FILE: z.string().min(1),
+  ELSERELAY_PRODUCT: z.enum(PRODUCTS),
+  ELSERELAY_STATE_DIR: z.string().min(1),
+  ELSERELAY_SESSIONS: z
     .string()
     .transform((list) => list.split(/[\s,]+/).filter((id) => id !== ""))
     .pipe(z.array(z.string()).min(1, "name at least one session id, or leave it unset"))
@@ -57,18 +57,18 @@ export type Config = {
 export function readConfig(source: Readonly<Record<string, string | undefined>>, home: string = homedir()): Config | string {
   // An empty variable is as good as an unset one, so a unit file may name it without a value. The exception is the session list: an
   // adapter that was meant to serve a few sessions must not serve all of them because the value was lost on the way.
-  const present = Object.fromEntries(Object.entries(source).filter(([k, v]) => v !== undefined && (v !== "" || k === "GATEWAY_SESSIONS")));
+  const present = Object.fromEntries(Object.entries(source).filter(([k, v]) => v !== undefined && (v !== "" || k === "ELSERELAY_SESSIONS")));
   const parsed = env.safeParse(present);
   if (!parsed.success) {
     return parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
   }
   const e = parsed.data;
   return {
-    url: e.GATEWAY_URL,
-    tokenFile: e.GATEWAY_TOKEN_FILE,
-    product: e.GATEWAY_PRODUCT,
-    stateDir: e.GATEWAY_STATE_DIR,
-    sessions: e.GATEWAY_SESSIONS ?? null,
+    url: e.ELSERELAY_URL,
+    tokenFile: e.ELSERELAY_TOKEN_FILE,
+    product: e.ELSERELAY_PRODUCT,
+    stateDir: e.ELSERELAY_STATE_DIR,
+    sessions: e.ELSERELAY_SESSIONS ?? null,
     codexSocket: e.CODEX_SOCKET ?? join(e.CODEX_HOME ?? join(home, ".codex"), "app-server-control", "app-server-control.sock"),
     antigravityDb: e.ANTIGRAVITY_SUMMARIES_DB ?? defaultSummariesPath(home),
   };
@@ -114,18 +114,18 @@ const sleep = (ms: number, signal: AbortSignal): Promise<boolean> =>
 export async function runAdapter(source: Readonly<Record<string, string | undefined>> = process.env): Promise<number> {
   const config = readConfig(source);
   if (typeof config === "string") {
-    process.stderr.write(`agent-gateway adapter: bad settings: ${config}\n`);
+    process.stderr.write(`elserelay adapter: bad settings: ${config}\n`);
     return 2;
   }
   let token: string;
   try {
     token = (await readFile(config.tokenFile, "utf8")).trim();
   } catch {
-    process.stderr.write(`agent-gateway adapter: cannot read the token file ${config.tokenFile}\n`);
+    process.stderr.write(`elserelay adapter: cannot read the token file ${config.tokenFile}\n`);
     return 2;
   }
   if (token === "") {
-    process.stderr.write(`agent-gateway adapter: the token file ${config.tokenFile} is empty\n`);
+    process.stderr.write(`elserelay adapter: the token file ${config.tokenFile} is empty\n`);
     return 2;
   }
   const log = (line: string): void => {
@@ -151,7 +151,7 @@ export async function runAdapter(source: Readonly<Record<string, string | undefi
     stop.signal,
   );
   if (end.reason === "unauthorized") {
-    process.stderr.write(`agent-gateway adapter: ${end.message}\n`);
+    process.stderr.write(`elserelay adapter: ${end.message}\n`);
     return 1;
   }
   return 0;

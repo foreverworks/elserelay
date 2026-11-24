@@ -31,7 +31,7 @@ const approval = (changes: Record<string, unknown> = {}): Record<string, unknown
 let dir: string;
 let fake: FakeElsewire;
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), "agw-approver-"));
+  dir = mkdtempSync(join(tmpdir(), "elserelay-approver-"));
   fake = await fakeElsewire();
 });
 afterEach(async () => {
@@ -96,7 +96,7 @@ describe("asking a person through Elsewire", () => {
         notes: false,
         // Elsewire refuses a request that does not say who asks and how to reach it.
         requester: {
-          client: "agent-gateway",
+          client: "elserelay",
           session: "msg-1",
           title: "Let this message go? alpha (claude) to beta (codex)",
           host: "box-1",
@@ -269,11 +269,11 @@ describe("asking a person through Elsewire", () => {
 
   it("takes the state directory the broker sets when ELSEWIRE_STATE_DIR is not", async () => {
     fake.script.push("error");
-    await run(approval(), { env: { ELSEWIRE_STATE_DIR: undefined, AGENT_GATEWAY_APPROVER_STATE_DIR: join(dir, "from-broker") } });
+    await run(approval(), { env: { ELSEWIRE_STATE_DIR: undefined, ELSERELAY_APPROVER_STATE_DIR: join(dir, "from-broker") } });
     expect(readdirSync(join(dir, "from-broker"))).toEqual([sha("msg-1")]);
   });
 
-  it("is run by `agent-gateway approver elsewire`, with the request on stdin and the answer on stdout", async () => {
+  it("is run by `elserelay approver elsewire`, with the request on stdin and the answer on stdout", async () => {
     fake.script.push(done(draftFor()));
     const out: string[] = [];
     const code = await runCli(

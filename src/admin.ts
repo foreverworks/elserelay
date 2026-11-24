@@ -9,7 +9,7 @@ import type { Address, AuditEntry } from "./core/types.js";
 import { openStore } from "./store/sqlite.js";
 import type { Io } from "./cli.js";
 
-export const USAGE = `usage: agent-gateway <command> [--config <file>]
+export const USAGE = `usage: elserelay <command> [--config <file>]
 
   broker             run the broker
   approvals          show the messages waiting for a yes or a no
@@ -23,11 +23,11 @@ export const USAGE = `usage: agent-gateway <command> [--config <file>]
   adapter            run the adapter beside an agent (settings from the environment)
   hook antigravity   the Antigravity hook: reads its JSON on stdin, prints what waits
   health [url]       exit 0 when the broker's /healthz answers, 1 if not (a healthcheck
-                     without curl; the url may be AGENT_GATEWAY_HEALTH_URL)
+                     without curl; the url may be ELSERELAY_HEALTH_URL)
   approver elsewire  an approver command for the broker: reads a request on stdin,
                      asks a person through an Elsewire server, prints the answer
 
-The config file is --config, or the AGENT_GATEWAY_CONFIG variable. The last four
+The config file is --config, or the ELSERELAY_CONFIG variable. The last four
 commands take no config file.`;
 
 const place = (a: Address): string => escapeForTerminal(`${a.container}/${a.session}`).replace(/\n/g, " ");
@@ -47,7 +47,7 @@ export async function runAdmin(argv: readonly string[], env: Readonly<Record<str
     return 2;
   }
   const [command, id, ...rest] = parsed.positionals;
-  const configPath = parsed.values.config ?? env["AGENT_GATEWAY_CONFIG"];
+  const configPath = parsed.values.config ?? env["ELSERELAY_CONFIG"];
   if (command === undefined || rest.length > 0 || configPath === undefined || configPath === "") {
     io.err(USAGE);
     return 2;

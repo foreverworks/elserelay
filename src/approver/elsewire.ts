@@ -1,5 +1,5 @@
 /**
- * `agent-gateway approver elsewire`: a command for the broker's `command`
+ * `elserelay approver elsewire`: a command for the broker's `command`
  * approver. It reads one approval request on stdin, asks a person through an
  * Elsewire server (an MCP server over streamable HTTP with a bearer token), and
  * prints `{"answer":"approve"}` or `{"answer":"refuse"}` (with the reason
@@ -19,7 +19,7 @@
  * when only the broker is going away: the request stays open and its state file
  * stays, so the next broker run picks it up.
  * Settings come from the environment: ELSEWIRE_URL, ELSEWIRE_TOKEN_FILE and
- * ELSEWIRE_STATE_DIR (or the AGENT_GATEWAY_APPROVER_STATE_DIR the broker sets).
+ * ELSEWIRE_STATE_DIR (or the ELSERELAY_APPROVER_STATE_DIR the broker sets).
  * Neither the token nor a message body is ever written to stderr.
  */
 import { createHash } from "node:crypto";
@@ -128,7 +128,7 @@ export const draftForMessage = (r: Request): string => draftOf(render(r));
 
 /** Who is asking, which Elsewire requires: the gateway itself, for one thread. A gateway has no page to link to. */
 export const requesterOf = (r: Request, host: string): Record<string, unknown> => ({
-  client: "agent-gateway",
+  client: "elserelay",
   session: r.thread,
   title: titleOf(r),
   host,
@@ -282,7 +282,7 @@ export async function runElsewireApprover(effects: Effects): Promise<number> {
   const config = settings.safeParse({
     ELSEWIRE_URL: env["ELSEWIRE_URL"],
     ELSEWIRE_TOKEN_FILE: env["ELSEWIRE_TOKEN_FILE"],
-    state: env["ELSEWIRE_STATE_DIR"] ?? env["AGENT_GATEWAY_APPROVER_STATE_DIR"],
+    state: env["ELSEWIRE_STATE_DIR"] ?? env["ELSERELAY_APPROVER_STATE_DIR"],
   });
   if (!config.success) {
     err(`settings: ${config.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")} (ELSEWIRE_URL, ELSEWIRE_TOKEN_FILE and ELSEWIRE_STATE_DIR are needed)`);
@@ -353,7 +353,7 @@ export function mcpTools(url: string, token: string): Tools {
   let client: Client | undefined;
   const connected = async (): Promise<Client> => {
     if (client !== undefined) return client;
-    const made = new Client({ name: "agent-gateway-approver", version: "1.0.0" });
+    const made = new Client({ name: "elserelay-approver", version: "1.0.0" });
     await made.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     client = made;
     return made;

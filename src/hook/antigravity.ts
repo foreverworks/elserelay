@@ -1,5 +1,5 @@
 /**
- * `agent-gateway hook antigravity`: the command Antigravity runs before a model
+ * `elserelay hook antigravity`: the command Antigravity runs before a model
  * call. It reads the hook's JSON on stdin, asks the broker what waits for that
  * conversation and prints it as steps to inject. Output shape and why this
  * way are in docs/drivers/antigravity.md.
@@ -27,7 +27,7 @@ export type HookDeps = {
 
 const input = z.object({ conversationId: z.string().min(1).max(200) });
 const answer = z.object({ messages: z.array(z.object({ id: z.string(), text: z.string() })) });
-const settings = z.object({ GATEWAY_URL: z.url(), GATEWAY_TOKEN_FILE: z.string().min(1) });
+const settings = z.object({ ELSERELAY_URL: z.url(), ELSERELAY_TOKEN_FILE: z.string().min(1) });
 
 /** Settles with `promise`, or rejects when the signal fires first. */
 function before<T>(signal: AbortSignal, promise: Promise<T>): Promise<T> {
@@ -50,11 +50,11 @@ async function pull(deps: HookDeps, signal: AbortSignal): Promise<Pulled> {
     throw new Error("stdin is not JSON");
   }
   const { conversationId } = input.parse(stdin);
-  const token = (await before(signal, deps.readFile(config.GATEWAY_TOKEN_FILE))).trim();
+  const token = (await before(signal, deps.readFile(config.ELSERELAY_TOKEN_FILE))).trim();
   if (token === "") throw new Error("the token file is empty");
 
   const post = (body: InboxRequest): Promise<Response> =>
-    deps.fetch(new URL(INBOX_PATH, config.GATEWAY_URL), {
+    deps.fetch(new URL(INBOX_PATH, config.ELSERELAY_URL), {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -85,7 +85,7 @@ export async function runAntigravityHook(deps: HookDeps): Promise<number> {
     if (pulled.messages.length > 0) deps.out(JSON.stringify({ injectSteps: pulled.messages.map((m) => ({ userMessage: m.text })) }));
   } catch (error) {
     // One line naming the failure, never a message text or the token. stdout stays empty.
-    deps.err(`agent-gateway hook: ${error instanceof Error ? error.message.split("\n")[0] : "failed"}`);
+    deps.err(`elserelay hook: ${error instanceof Error ? error.message.split("\n")[0] : "failed"}`);
     return 0;
   }
   // Only after the text has been written is it known to have left; a failure here is ignored, and the broker returns the messages later.

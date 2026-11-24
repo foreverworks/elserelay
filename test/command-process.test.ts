@@ -9,7 +9,7 @@ import type { Harness } from "./http-rig.js";
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "agw-cmd-"));
+  dir = mkdtempSync(join(tmpdir(), "elserelay-cmd-"));
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -233,7 +233,7 @@ describe("the command approver in a broker", () => {
       HOME: "/home/x",
       LANG: "C",
       PASSED_ON: "yes please",
-      AGENT_GATEWAY_APPROVER_STATE_DIR: join(dir, "state"),
+      ELSERELAY_APPROVER_STATE_DIR: join(dir, "state"),
     });
   });
 

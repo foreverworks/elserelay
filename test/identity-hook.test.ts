@@ -25,7 +25,7 @@ const call1 = (tool: string, input: unknown, extra: Record<string, unknown> = {}
 
 describe("hook claude and hook codex", () => {
   it("claude: puts the reported session id into the arguments and sets no permission decision", async () => {
-    const r = await run("claude", call1("mcp__gateway__send", { to_container: "b", to_session: "b1", body: "hi", session: "mistyped", title: "mine" }));
+    const r = await run("claude", call1("mcp__elserelay__send", { to_container: "b", to_session: "b1", body: "hi", session: "mistyped", title: "mine" }));
     expect(r.code).toBe(0);
     expect(r.out).toHaveLength(1);
     expect(JSON.parse(r.out[0] ?? "")).toEqual({
@@ -37,7 +37,7 @@ describe("hook claude and hook codex", () => {
   });
 
   it("codex: the same, with an allow, because Codex applies updatedInput only with one", async () => {
-    const r = await run("codex", call1("mcp__gateway__reply", { message_id: "m1", body: "ok" }));
+    const r = await run("codex", call1("mcp__elserelay__reply", { message_id: "m1", body: "ok" }));
     expect(JSON.parse(r.out[0] ?? "")).toEqual({
       hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { message_id: "m1", body: "ok", session: "real-id" } },
     });
@@ -45,28 +45,28 @@ describe("hook claude and hook codex", () => {
 
   it("fills in a session the model left out, for inbox and for send, reply", async () => {
     for (const tool of ["send", "inbox", "reply"]) {
-      const r = await run("claude", call1(`mcp__gateway__${tool}`, {}));
+      const r = await run("claude", call1(`mcp__elserelay__${tool}`, {}));
       expect(JSON.parse(r.out[0] ?? "").hookSpecificOutput.updatedInput).toEqual({ session: "real-id" });
     }
   });
 
   it("does not change the arguments it was given or drop any of them", () => {
     const input = { to_container: "b", body: "x", session: "old", received: ["a"] };
-    decide("claude", JSON.parse(call1("mcp__gateway__inbox", input)), "gateway");
+    decide("claude", JSON.parse(call1("mcp__elserelay__inbox", input)), "elserelay");
     expect(input.session).toBe("old");
   });
 
-  it("matches only this server's tools: GATEWAY_HOOK_SERVER names the server, the default is gateway", async () => {
+  it("matches only this server's tools: ELSERELAY_HOOK_SERVER names the server, the default is elserelay", async () => {
     expect((await run("claude", call1("mcp__other__send", {}))).out).toEqual([]);
-    expect((await run("claude", call1("mcp__gateway__send", {}), { GATEWAY_HOOK_SERVER: "agw" })).out).toEqual([]);
-    const named = await run("codex", call1("mcp__agw__send", {}), { GATEWAY_HOOK_SERVER: "agw" });
+    expect((await run("claude", call1("mcp__elserelay__send", {}), { ELSERELAY_HOOK_SERVER: "other" })).out).toEqual([]);
+    const named = await run("codex", call1("mcp__other__send", {}), { ELSERELAY_HOOK_SERVER: "other" });
     expect(JSON.parse(named.out[0] ?? "").hookSpecificOutput.updatedInput).toEqual({ session: "real-id" });
     // An empty setting is the default, not a server called "".
-    expect((await run("claude", call1("mcp__gateway__send", {}), { GATEWAY_HOOK_SERVER: " " })).out).toHaveLength(1);
+    expect((await run("claude", call1("mcp__elserelay__send", {}), { ELSERELAY_HOOK_SERVER: " " })).out).toHaveLength(1);
   });
 
   it("prints nothing for any other tool, in particular nothing that would allow it on Codex", async () => {
-    const others = ["Bash", "Read", "mcp__gateway__list_peers", "mcp__gateway__other", "mcp__gateway__", "mcp__gateway__send_all", "mcp__gatewayx__send", "gateway__send", "send", "mcp__gateway__send__x"];
+    const others = ["Bash", "Read", "mcp__elserelay__list_peers", "mcp__elserelay__other", "mcp__elserelay__", "mcp__elserelay__send_all", "mcp__gatewayx__send", "gateway__send", "send", "mcp__elserelay__send__x"];
     for (const tool of others) {
       for (const product of ["claude", "codex"] as const) expect((await run(product, call1(tool, { command: "ls" }))).out).toEqual([]);
     }
@@ -77,21 +77,21 @@ describe("hook claude and hook codex", () => {
   it("for our tools without a usable session id, prints nothing and exits 0", async () => {
     const bad: unknown[] = [undefined, null, "", "   ", 5, {}, "x".repeat(201)];
     for (const session_id of bad) {
-      const text = JSON.stringify({ session_id, tool_name: "mcp__gateway__send", tool_input: { session: "claimed" } });
+      const text = JSON.stringify({ session_id, tool_name: "mcp__elserelay__send", tool_input: { session: "claimed" } });
       for (const product of ["claude", "codex"] as const) expect(await run(product, text)).toEqual({ out: [], code: 0 });
     }
   });
 
   it("trims the id, and refuses arguments that are not an object", async () => {
-    const r = await run("claude", JSON.stringify({ session_id: "  real-id \n", tool_name: "mcp__gateway__inbox", tool_input: {} }));
+    const r = await run("claude", JSON.stringify({ session_id: "  real-id \n", tool_name: "mcp__elserelay__inbox", tool_input: {} }));
     expect(JSON.parse(r.out[0] ?? "").hookSpecificOutput.updatedInput.session).toBe("real-id");
     for (const tool_input of [undefined, null, "x", ["a"], 3]) {
-      expect((await run("codex", JSON.stringify({ session_id: "s", tool_name: "mcp__gateway__inbox", tool_input }))).out).toEqual([]);
+      expect((await run("codex", JSON.stringify({ session_id: "s", tool_name: "mcp__elserelay__inbox", tool_input }))).out).toEqual([]);
     }
   });
 
   it("prints nothing and exits 0 for stdin that is empty, not JSON, JSON of another shape, or fails to read", async () => {
-    for (const text of ["", "not json", "null", "[]", "7", '"mcp__gateway__send"', "{"]) expect(await run("codex", text)).toEqual({ out: [], code: 0 });
+    for (const text of ["", "not json", "null", "[]", "7", '"mcp__elserelay__send"', "{"]) expect(await run("codex", text)).toEqual({ out: [], code: 0 });
     expect(await run("claude", async () => Promise.reject(new Error("closed")))).toEqual({ out: [], code: 0 });
   });
 
@@ -103,9 +103,9 @@ describe("hook claude and hook codex", () => {
   });
 
   it("gatewayTool names the tool, or null", () => {
-    expect(gatewayTool("mcp__gateway__send", "gateway")).toBe("send");
-    expect(gatewayTool("mcp__gateway__list_peers", "gateway")).toBeNull();
-    expect(gatewayTool(undefined, "gateway")).toBeNull();
+    expect(gatewayTool("mcp__elserelay__send", "elserelay")).toBe("send");
+    expect(gatewayTool("mcp__elserelay__list_peers", "elserelay")).toBeNull();
+    expect(gatewayTool(undefined, "elserelay")).toBeNull();
   });
 });
 
@@ -118,12 +118,12 @@ describe("the program's hook commands", () => {
   };
 
   it("runs hook claude and hook codex, one JSON line each, nothing on stderr", async () => {
-    const claude = await cli("claude", call1("mcp__gateway__send", {}));
+    const claude = await cli("claude", call1("mcp__elserelay__send", {}));
     expect(claude.code).toBe(0);
     expect(claude.err).toEqual([]);
     expect(claude.out).toHaveLength(1);
     expect(JSON.parse(claude.out[0] ?? "").hookSpecificOutput).not.toHaveProperty("permissionDecision");
-    expect(JSON.parse((await cli("codex", call1("mcp__gateway__send", {}))).out[0] ?? "").hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(JSON.parse((await cli("codex", call1("mcp__elserelay__send", {}))).out[0] ?? "").hookSpecificOutput.permissionDecision).toBe("allow");
   });
 
   it("prints nothing for another tool and for bad input, and reads no settings of the broker", async () => {
@@ -134,7 +134,7 @@ describe("the program's hook commands", () => {
   it("does not take the hook for claude or codex with extra words", async () => {
     const out: string[] = [];
     const err: string[] = [];
-    const code = await runCli(["hook", "claude", "extra"], {}, { out: (l) => out.push(l), err: (l) => err.push(l), now: () => 0, stdin: async () => call1("mcp__gateway__send", {}) });
+    const code = await runCli(["hook", "claude", "extra"], {}, { out: (l) => out.push(l), err: (l) => err.push(l), now: () => 0, stdin: async () => call1("mcp__elserelay__send", {}) });
     expect(code).not.toBe(0);
     expect(out.join("\n")).not.toContain("updatedInput");
   });
@@ -161,7 +161,7 @@ describe("a call through the hook against a real broker", () => {
     open.push({ h, a, alpha });
 
     const asked = { to_container: "beta", to_session: "b1", body: "hello", session: "a-typo", title: "Alpha" };
-    const hooked = await run("claude", call1("mcp__gateway__send", asked));
+    const hooked = await run("claude", call1("mcp__elserelay__send", asked));
     const updated = JSON.parse(hooked.out[0] ?? "").hookSpecificOutput.updatedInput as Record<string, unknown>;
     const sent = await call(alpha, "send", updated);
     expect(sent.isError).toBe(false);

@@ -11,7 +11,7 @@ import { z } from "zod";
 import type { Capabilities, Delivered, Driver, Seen } from "./driver.js";
 
 /** The line the session's socket takes. The sender's name is in the text, because the model is not shown `from`. */
-const FROM = "agent-gateway";
+const FROM = "elserelay";
 const SUPPORTED_PEER_PROTOCOL = 1;
 const COLD_AFTER_MS = 60 * 60 * 1000;
 /** How long a socket that stays quiet is taken to have kept the message. */

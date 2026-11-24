@@ -9,7 +9,7 @@ import { message } from "./fixtures.js";
 let dir: string;
 let configPath: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "agw-cli-"));
+  dir = mkdtempSync(join(tmpdir(), "elserelay-cli-"));
   configPath = join(dir, "config.json");
   writeFileSync(
     configPath,
@@ -38,7 +38,7 @@ const stoppedNow = (): boolean => {
   }
 };
 
-describe("agent-gateway", () => {
+describe("elserelay", () => {
   it("stops and starts, leaving a line with the time on stderr", async () => {
     const stop = io();
     expect(await runCli(["stop", "--config", configPath], {}, stop.io)).toBe(0);
@@ -52,7 +52,7 @@ describe("agent-gateway", () => {
 
   it("takes the config path from the environment", async () => {
     const run = io();
-    expect(await runCli(["approvals"], { AGENT_GATEWAY_CONFIG: configPath }, run.io)).toBe(0);
+    expect(await runCli(["approvals"], { ELSERELAY_CONFIG: configPath }, run.io)).toBe(0);
     expect(run.out).toEqual(["nothing is waiting"]);
   });
 
@@ -62,7 +62,7 @@ describe("agent-gateway", () => {
     expect(await runCli([], {}, run.io)).toBe(2);
     expect(await runCli(["approvals"], {}, run.io)).toBe(2);
     expect(await runCli(["nonsense", "--config", configPath], {}, run.io)).toBe(2);
-    expect(run.err.join("\n")).toContain("usage: agent-gateway");
+    expect(run.err.join("\n")).toContain("usage: elserelay");
   });
 
   it("says so when a message is unknown, and rejects a bad time for audit", async () => {

@@ -422,7 +422,7 @@ describe("audit", () => {
 describe("a store file", () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "agw-store-"));
+    dir = mkdtempSync(join(tmpdir(), "elserelay-store-"));
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

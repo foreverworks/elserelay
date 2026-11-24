@@ -3,7 +3,7 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createWriteStream, writeFileSync } from "node:fs";
 import { record } from "./util.ts";
 
-export const GATEWAY_TOOLS = ["list_peers", "send", "inbox", "reply"] as const;
+export const ELSERELAY_TOOLS = ["list_peers", "send", "inbox", "reply"] as const;
 
 export type Turn = { readonly text: string; readonly isError: boolean; readonly cost: number };
 export type ToolCall = { readonly name: string; readonly input: unknown };
@@ -34,13 +34,13 @@ export type SessionOptions = {
 
 /** An MCP config file (mode 0600) that names only this gateway and one container's bearer. */
 export function writeMcpConfig(path: string, mcpPort: number, token: string): string {
-  const config = { mcpServers: { gateway: { type: "http", url: `http://127.0.0.1:${mcpPort}/mcp`, headers: { Authorization: `Bearer ${token}` } } } };
+  const config = { mcpServers: { elserelay: { type: "http", url: `http://127.0.0.1:${mcpPort}/mcp`, headers: { Authorization: `Bearer ${token}` } } } };
   writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
   return path;
 }
 
 export function startSession(o: SessionOptions): Session {
-  const allowed = GATEWAY_TOOLS.map((tool) => `mcp__gateway__${tool}`).join(",");
+  const allowed = ELSERELAY_TOOLS.map((tool) => `mcp__elserelay__${tool}`).join(",");
   const child = spawn(
     o.claude,
     [
@@ -108,7 +108,7 @@ export function startSession(o: SessionOptions): Session {
   };
 }
 
-export const toolsCalled = (s: Session, tool: string): ToolCall[] => s.calls.filter((c) => c.name === `mcp__gateway__${tool}`);
+export const toolsCalled = (s: Session, tool: string): ToolCall[] => s.calls.filter((c) => c.name === `mcp__elserelay__${tool}`);
 
 export function versionOf(binary: string): Promise<string> {
   return new Promise((done) => {

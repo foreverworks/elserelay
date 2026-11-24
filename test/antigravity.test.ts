@@ -18,7 +18,7 @@ let dir: string;
 let path: string;
 let logs: string[];
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "agw-agy-"));
+  dir = mkdtempSync(join(tmpdir(), "elserelay-agy-"));
   path = join(dir, "conversation_summaries.db");
   logs = [];
 });

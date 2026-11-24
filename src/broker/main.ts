@@ -112,7 +112,7 @@ export async function startBroker(config: Config, effects: Effects): Promise<Run
   const adapters = await listen(channel, config.listen.host, config.listen.adapterPort);
 
   const mcp = await serve({
-    name: "agent-gateway",
+    name: "elserelay",
     version: version(),
     instructions: INSTRUCTIONS,
     register: registerTools(service, channel.pump),
@@ -163,7 +163,7 @@ export async function startBroker(config: Config, effects: Effects): Promise<Run
 export async function runBroker(configPath: string, effects: Effects = realEffects): Promise<void> {
   const config = loadConfig(configPath);
   const running = await startBroker(config, effects);
-  effects.log(`agent-gateway: MCP on ${config.listen.host}:${running.mcpPort}, adapters on ${config.listen.host}:${running.adapterPort}`);
+  effects.log(`elserelay: MCP on ${config.listen.host}:${running.mcpPort}, adapters on ${config.listen.host}:${running.adapterPort}`);
   await new Promise<void>((resolve) => {
     const stop = (): void => resolve();
     process.once("SIGTERM", stop);

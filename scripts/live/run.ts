@@ -114,11 +114,11 @@ export function spawnAdapter(o: AdapterOptions): ChildProcess {
     stdio: ["ignore", "ignore", "pipe"],
     env: {
       ...process.env,
-      GATEWAY_URL: `http://127.0.0.1:${o.adapterPort}`,
-      GATEWAY_TOKEN_FILE: tokenFile(o.tokensDir, o.label),
-      GATEWAY_PRODUCT: o.product,
-      GATEWAY_STATE_DIR: o.stateDir,
-      GATEWAY_SESSIONS: o.sessions,
+      ELSERELAY_URL: `http://127.0.0.1:${o.adapterPort}`,
+      ELSERELAY_TOKEN_FILE: tokenFile(o.tokensDir, o.label),
+      ELSERELAY_PRODUCT: o.product,
+      ELSERELAY_STATE_DIR: o.stateDir,
+      ELSERELAY_SESSIONS: o.sessions,
       ...o.env,
     },
   });
