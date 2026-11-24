@@ -23,7 +23,8 @@ export function step(tracked: Tracked, event: Event, at: number): Step {
     case "refuse":
       return go({ state: "refused", reason: event.reason });
     case "hold":
-      return state === "received" ? go({ state: "held" }) : no();
+      // A queued message is held again when a rule that let it through now asks: see `service.ts`.
+      return state === "received" || state === "queued" ? go({ state: "held" }) : no();
     case "queue":
       return state === "received" ? go({ state: "queued" }) : no();
     case "approve":

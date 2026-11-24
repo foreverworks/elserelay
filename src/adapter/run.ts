@@ -162,12 +162,16 @@ export async function run(deps: RunDeps, signal: AbortSignal): Promise<RunEnd> {
   const reportLoop = async (sig: AbortSignal): Promise<void> => {
     let lastJson = "";
     let lastAt = Number.NEGATIVE_INFINITY;
+    let lastFailure: string | null = null;
     while (!sig.aborted) {
       let sessions: AdapterReport["sessions"] | null = null;
       try {
         sessions = [...(await driver.list())].sort((a, b) => a.session.localeCompare(b.session));
+        lastFailure = null;
       } catch (e) {
-        deps.log(`could not list sessions: ${message(e)}`);
+        // Nothing is posted, so the broker keeps the last list; an empty one would say every session is gone. A failure that repeats is logged once.
+        if (message(e) !== lastFailure) deps.log(`could not list sessions: ${message(e)}`);
+        lastFailure = message(e);
       }
       if (sessions) {
         const json = JSON.stringify(sessions);

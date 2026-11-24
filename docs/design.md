@@ -31,6 +31,12 @@ whether it may go, who it came from, and whether a person has to say yes first.
   holds no policy: `list`, `deliver`, `status`, `capabilities`.
 - **Agents speak MCP to the broker**: `list_peers`, `send`, `inbox`, `reply`. A
   new product needs a driver and an MCP registration, nothing else.
+- **A product that cannot be pushed to** has a hook instead. The hook runs
+  `agent-gateway hook <product>`, which asks the broker for the session's waiting
+  messages (`POST /adapter/inbox`, with the container's token, the same service
+  call as the MCP `inbox`) and prints them in the product's own format. A hook
+  never delays or breaks the agent: it has three seconds, and any failure prints
+  nothing.
 
 If the gateway stops, agents keep working and only messages wait.
 
@@ -60,7 +66,10 @@ A declarative file. Rules are read in order, the first match decides, and no
 match is a refusal. A rule matches on the sender's and the receiver's container
 and product, and answers `allow`, `deny` or `ask`. `ask` holds the message until
 the approver answers; no answer in time is a refusal. The rules are checked again
-at delivery, so a rule added while a message waits still applies to it.
+at delivery, so a rule added while a message waits still applies to it: a `deny`
+refuses the message, and an `ask` holds a queued message for the approver, as if
+it had just been sent. A message a person has already approved is never asked
+about again, whatever the rule says by then.
 
 ## Message states
 
@@ -68,7 +77,9 @@ at delivery, so a rule added while a message waits still applies to it.
             ┌────────► refused ◄───────┬───────────┐
  received ──┤                          │           │
             ├────────► held ───────────┤           │
-            │           │ approved     │           │
+            │           │ ▲            │           │
+            │  approved │ │ the rule   │           │
+            │           ▼ │ now asks   │           │
             └────────► queued ─────► delivering    │
                         ▲   │           │  │       │
                         │   │ expired   │  └──► delivered
@@ -96,7 +107,18 @@ cold makes it read its whole context again.
 - **Rate:** messages per pair of containers in a sliding window.
 - **Waking:** off by default. A message to a cold session waits in its inbox until
   its next turn. A rule can allow waking for a pair.
-- **Stop:** one switch holds every delivery.
+- **Stop:** one switch. At send, a message is refused with the reason `stopped`
+  (a `deny` rule still answers first, so a stopped gateway tells a sender nothing
+  more about what exists). At delivery, nothing leaves: a message queued before
+  the stop stays queued, push and `inbox` hand out nothing, and it goes after
+  `start`; its expiry keeps running meanwhile. Every stop and start is written to
+  a control log beside the audit, which like the audit cannot be changed or
+  removed.
+- **Offline adapters:** an adapter keeps one stream open to the broker. When a
+  container's stream has been closed for more than 90 seconds, its sessions are
+  shown as `unknown` with `offline: true` in `list_peers`, and nothing is pushed
+  to them, not even where a rule allows waking. A send still queues, and a
+  session can still pull its own inbox. The stream opening again lifts it.
 
 Every limit refuses with a reason the sender can read.
 
@@ -125,5 +147,6 @@ src/
   store/     SQLite: messages, peers, audit
   broker/    the MCP tools, the adapter channel, the approver interface
   adapter/   the loop that runs beside an agent
+  hook/      the commands a product's hook runs
   drivers/   fake, claude, codex, antigravity
 ```

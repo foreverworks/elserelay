@@ -227,6 +227,36 @@ describe("stop switch", () => {
   });
 });
 
+describe("control log", () => {
+  it("records every stop and start, also a repeat, oldest first", () => {
+    store.setStopped(true, 10);
+    store.setStopped(true, 20);
+    store.setStopped(false, 30);
+    expect(store.controlAudit(0)).toEqual([
+      { at: 10, action: "stop" },
+      { at: 20, action: "stop" },
+      { at: 30, action: "start" },
+    ]);
+    expect(store.controlAudit(21)).toEqual([{ at: 30, action: "start" }]);
+  });
+});
+
+describe("wasApproved", () => {
+  it("is true only for a message that was approved, whatever happens to it later", () => {
+    store.receive(message("a"), 1);
+    store.receive(message("b"), 1);
+    store.apply("a", events.hold, 2);
+    store.apply("b", events.queue, 2);
+    expect(store.wasApproved("a")).toBe(false);
+    store.apply("a", events.approve, 3);
+    store.apply("a", events["hand-out"], 4);
+    store.apply("a", events.retry, 5);
+    expect(store.wasApproved("a")).toBe(true);
+    expect(store.wasApproved("b")).toBe(false);
+    expect(store.wasApproved("nope")).toBe(false);
+  });
+});
+
 describe("audit", () => {
   it("lists entries from a time on, in order", () => {
     store.receive(message("a"), 10);
@@ -270,7 +300,7 @@ describe("a store file", () => {
 
     const raw = new DatabaseSync(path);
     expect(raw.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-    expect(raw.prepare("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+    expect(raw.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
     raw.close();
   });
 
@@ -292,6 +322,34 @@ describe("a store file", () => {
     expect(() => raw.exec("DELETE FROM audit")).toThrow(/never removed/);
     expect(raw.prepare("SELECT COUNT(*) AS n FROM audit").get()).toEqual({ n: 1 });
     raw.close();
+  });
+
+  it("the control log refuses UPDATE and DELETE like the audit", () => {
+    const path = join(dir, "gw.sqlite");
+    const s = openStore(path);
+    s.setStopped(true, 1);
+    s.close();
+    const raw = new DatabaseSync(path);
+    expect(() => raw.exec("UPDATE control_log SET action = 'start'")).toThrow(/never changed/);
+    expect(() => raw.exec("DELETE FROM control_log")).toThrow(/never removed/);
+    raw.close();
+  });
+
+  it("opens a version 1 file, adds the control log and keeps its messages", () => {
+    const path = join(dir, "old.sqlite");
+    const first = openStore(path);
+    first.receive(message("a"), 1);
+    first.close();
+    const raw = new DatabaseSync(path);
+    raw.exec("DROP TABLE control_log");
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+
+    const second = openStore(path);
+    expect(second.get("a")?.state).toBe("received");
+    second.setStopped(true, 5);
+    expect(second.controlAudit(0)).toEqual([{ at: 5, action: "stop" }]);
+    second.close();
   });
 
   it("the tables are strict", () => {

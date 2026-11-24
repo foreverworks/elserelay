@@ -360,6 +360,139 @@ describe("outcome", () => {
   });
 });
 
+describe("a rule that changes from allow to ask", () => {
+  const ASK = { rules: [{ name: "ask", from: {}, to: {}, decision: "ask" }] };
+  const queued = (r: Rig, session = "b1"): string => {
+    const sent = r.service.send("alpha", alpha, to(session), "hi");
+    if (sent.kind !== "accepted" || sent.state !== "queued") throw new Error("not queued");
+    return sent.id;
+  };
+
+  it("holds a queued message at delivery instead of handing it out, and a person's yes releases it", () => {
+    const r = make();
+    const id = queued(r);
+    const strict = r.withPolicy(policyOf(ASK));
+    expect(strict.nextFor("beta")).toEqual([]);
+    expect(r.store.get(id)).toMatchObject({ state: "held" });
+    expect(strict.approvals().map((a) => [a.id, a.rule, a.decideBy])).toEqual([[id, "ask", 10_000 + 900_000]]);
+    expect(strict.approve(id)).toEqual({ ok: true });
+    expect(strict.nextFor("beta").map((h) => h.id)).toEqual([id]);
+    expect(r.store.audit(0).filter((e) => e.message === id).map((e) => e.event)).toEqual(["receive", "queue", "hold", "approve", "hand-out"]);
+  });
+
+  it("holds it at the inbox as well, and the held message is not shown", () => {
+    const r = make();
+    const id = queued(r, "b2");
+    const strict = r.withPolicy(policyOf(ASK));
+    expect(strict.inbox("beta", "b2")).toEqual({ kind: "ok", messages: [] });
+    expect(r.store.get(id)?.state).toBe("held");
+    expect(strict.approve(id)).toEqual({ ok: true });
+    const got = strict.inbox("beta", "b2");
+    expect(got.kind === "ok" && got.messages.map((m) => m.id)).toEqual([id]);
+  });
+
+  it("does not ask again about a message a person approved, also after a retry", () => {
+    const r = make(ASK);
+    const sent = r.service.send("alpha", alpha, to("b1"), "may I?");
+    if (sent.kind !== "accepted") throw new Error("not held");
+    r.service.approve(sent.id);
+    expect(r.service.nextFor("beta").map((h) => h.id)).toEqual([sent.id]);
+    r.service.outcome("beta", { id: sent.id, attempt: 1, result: { ok: false, retry: true, detail: "busy" } });
+    expect(r.service.nextFor("beta").map((h) => [h.id, h.attempt])).toEqual([[sent.id, 2]]);
+    expect(r.service.approvals()).toEqual([]);
+  });
+
+  it("lets a held message time out like any other, from the moment it was held", () => {
+    const r = make();
+    const id = queued(r);
+    r.clock.t += 5000;
+    const strict = r.withPolicy(policyOf({ ...ASK, limits: { approvalTtlMs: 1000 } }));
+    strict.nextFor("beta");
+    r.clock.t += 1000;
+    strict.tick();
+    expect(r.store.get(id)).toMatchObject({ state: "refused", reason: { kind: "approver", answer: "timeout" } });
+  });
+});
+
+describe("an adapter that is offline", () => {
+  const view = (r: Rig) => {
+    const peers = r.service.listPeers("alpha");
+    if (!Array.isArray(peers)) throw new Error("forbidden");
+    return peers.filter((p) => p.container === "beta").map((p) => [p.session, p.activity, p.offline]);
+  };
+
+  it("shows its sessions as unknown once the stream has been closed for over 90 seconds, and pushes nothing", () => {
+    const r = make();
+    r.service.streamOpened("beta");
+    r.service.send("alpha", alpha, to("b1"), "hi");
+    r.service.streamClosed("beta");
+    r.clock.t += 90_000;
+    expect(view(r)[0]).toEqual(["b1", "idle", false]);
+    r.clock.t += 1;
+    expect(view(r)).toEqual([["b1", "unknown", true], ["b2", "unknown", true], ["b3", "unknown", true], ["b4", "unknown", true]]);
+    expect(r.service.nextFor("beta")).toEqual([]);
+  });
+
+  it("does not push to an offline container even where a rule wakes cold sessions", () => {
+    const r = make();
+    r.service.send("alpha", alpha, to("b2"), "wake");
+    r.service.streamClosed("beta");
+    r.clock.t += 100_000;
+    const waking = r.withPolicy(policyOf({ rules: [{ name: "wake", from: {}, to: {}, decision: "allow", wake: true }] }));
+    waking.streamClosed("beta");
+    r.clock.t += 100_000;
+    expect(waking.nextFor("beta")).toEqual([]);
+  });
+
+  it("comes back as soon as the stream opens, with what it last reported", () => {
+    const r = make();
+    r.service.streamClosed("beta");
+    r.clock.t += 200_000;
+    expect(view(r)[0]).toEqual(["b1", "unknown", true]);
+    r.service.streamOpened("beta");
+    expect(view(r)[0]).toEqual(["b1", "idle", false]);
+  });
+
+  it("counts a container never seen since the broker started from the start", () => {
+    const r = make();
+    r.clock.t += 89_000;
+    expect(view(r)[0]).toEqual(["b1", "idle", false]);
+    r.clock.t += 2000;
+    expect(view(r)[0]).toEqual(["b1", "unknown", true]);
+  });
+
+  it("still lets the session pull its own inbox, which needs no adapter", () => {
+    const r = make();
+    r.service.send("alpha", alpha, to("b2"), "waiting");
+    r.service.streamClosed("beta");
+    r.clock.t += 200_000;
+    const got = r.service.inbox("beta", "b2");
+    expect(got.kind === "ok" && got.messages).toHaveLength(1);
+  });
+});
+
+describe("stop", () => {
+  it("refuses a send with the reason stopped, but a rule that denies answers first", () => {
+    const r = make();
+    r.store.setStopped(true, 1);
+    expect(r.service.send("alpha", alpha, to(), "hi")).toMatchObject({ kind: "refused", reason: { kind: "stopped" } });
+    const deny = r.withPolicy(policyOf({ rules: [{ name: "no", from: {}, to: {}, decision: "deny" }] }));
+    expect(deny.send("alpha", alpha, to(), "hi")).toMatchObject({ kind: "refused", reason: { kind: "policy", rule: "no" } });
+  });
+
+  it("keeps a message queued before the stop and hands it out after the start", () => {
+    const r = make();
+    const sent = r.service.send("alpha", alpha, to(), "early");
+    if (sent.kind !== "accepted") throw new Error("not queued");
+    r.store.setStopped(true, 1);
+    expect(r.service.nextFor("beta")).toEqual([]);
+    expect(r.service.inbox("beta", "b1")).toEqual({ kind: "ok", messages: [] });
+    expect(r.store.get(sent.id)?.state).toBe("queued");
+    r.store.setStopped(false, 2);
+    expect(r.service.nextFor("beta").map((h) => h.id)).toEqual([sent.id]);
+  });
+});
+
 describe("inbox", () => {
   it("hands out the session's waiting messages oldest first, delivered with certainty confirmed and read", () => {
     const r = make();

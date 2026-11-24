@@ -3,10 +3,10 @@ import type { SQLInputValue, StatementSync } from "node:sqlite";
 import { z } from "zod";
 import { step } from "../core/states.js";
 import { PRODUCTS, STATES } from "../core/types.js";
-import type { AuditEntry, Event, Message, Peer, Reason, Tracked } from "../core/types.js";
+import type { AuditEntry, ControlEntry, Event, Message, Peer, Reason, Tracked } from "../core/types.js";
 import type { Store } from "./types.js";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE messages (
@@ -79,6 +79,20 @@ CREATE TRIGGER audit_never_deleted BEFORE DELETE ON audit
 BEGIN SELECT RAISE(ABORT, 'audit entries are never removed'); END;
 `;
 
+// Added in version 2, so a version 1 file gets it by `migrate` without losing a message.
+const CONTROL_LOG = `
+CREATE TABLE control_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('stop', 'start'))
+) STRICT;
+CREATE INDEX control_log_by_time ON control_log (at);
+CREATE TRIGGER control_log_never_updated BEFORE UPDATE ON control_log
+BEGIN SELECT RAISE(ABORT, 'control log entries are never changed'); END;
+CREATE TRIGGER control_log_never_deleted BEFORE DELETE ON control_log
+BEGIN SELECT RAISE(ABORT, 'control log entries are never removed'); END;
+`;
+
 const reasonSchema: z.ZodType<Reason> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("policy"), rule: z.string().nullable() }),
   z.strictObject({ kind: z.literal("approver"), answer: z.enum(["no", "timeout"]) }),
@@ -139,6 +153,8 @@ const auditRow = z.object({
   detail: json,
 });
 
+const controlRow = z.object({ at: z.number(), action: z.enum(["stop", "start"]) });
+
 function toTracked(raw: unknown): Tracked {
   const row = messageRow.parse(raw);
   const message: Message = {
@@ -184,11 +200,12 @@ function inTransaction<T>(db: DatabaseSync, work: () => T): T {
 function migrate(db: DatabaseSync): void {
   const row = z.object({ user_version: z.number() }).parse(db.prepare("PRAGMA user_version").get());
   if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version !== 0) {
+  if (row.user_version !== 0 && row.user_version !== 1) {
     throw new Error(`the store file has schema version ${row.user_version}; this build reads version ${SCHEMA_VERSION}`);
   }
   inTransaction(db, () => {
-    db.exec(SCHEMA);
+    if (row.user_version === 0) db.exec(SCHEMA);
+    db.exec(CONTROL_LOG);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   });
 }
@@ -242,6 +259,9 @@ export function openStore(path: string): Store {
     "INSERT INTO control (name, value, at) VALUES ('stopped', ?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value, at = excluded.at",
   );
   const selectAudit = prepare("SELECT * FROM audit WHERE at >= ? ORDER BY id");
+  const selectApproved = prepare("SELECT 1 AS yes FROM audit WHERE message = ? AND event = 'approve' LIMIT 1");
+  const insertControl = prepare("INSERT INTO control_log (at, action) VALUES (?, ?)");
+  const selectControl = prepare("SELECT at, action FROM control_log WHERE at >= ? ORDER BY id");
 
   const audit = (tracked: Tracked, event: AuditEntry["event"], at: number, detail: Reason | null): void => {
     const { from, to, id, thread } = tracked.message;
@@ -281,6 +301,7 @@ export function openStore(path: string): Store {
       }),
 
     get: find,
+    wasApproved: (id) => selectApproved.get(id) !== undefined,
     queued: (container) => all(selectQueued, container).map(toTracked),
     overdue: (before) => all(selectOverdue, before).map(toTracked),
     held: () => all(selectHeld).map(toTracked),
@@ -310,11 +331,14 @@ export function openStore(path: string): Store {
       const row = selectStopped.get();
       return row !== undefined && z.object({ value: z.number() }).parse(row).value === 1;
     },
-    setStopped: (stopped, at) => {
-      upsertStopped.run(stopped ? 1 : 0, at);
-    },
+    setStopped: (stopped, at) =>
+      inTransaction(db, () => {
+        upsertStopped.run(stopped ? 1 : 0, at);
+        insertControl.run(at, stopped ? "stop" : "start");
+      }),
 
     audit: (since) => all(selectAudit, since).map(toAudit),
+    controlAudit: (since) => all(selectControl, since).map((raw): ControlEntry => controlRow.parse(raw)),
     close: () => db.close(),
   };
 }

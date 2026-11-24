@@ -8,7 +8,7 @@ import { events, tracked } from "./fixtures.js";
 const MOVES: Record<State, Partial<Record<Event["kind"], State>>> = {
   received: { refuse: "refused", hold: "held", queue: "queued" },
   held: { approve: "queued", refuse: "refused", expire: "expired" },
-  queued: { "hand-out": "delivering", refuse: "refused", expire: "expired" },
+  queued: { hold: "held", "hand-out": "delivering", refuse: "refused", expire: "expired" },
   delivering: { deliver: "delivered", retry: "queued", refuse: "refused", expire: "expired" },
   delivered: {},
   refused: {},

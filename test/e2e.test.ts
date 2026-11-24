@@ -38,8 +38,8 @@ describe("two adapters through one broker", () => {
     const r = await rig(ALLOW_ALL);
     const peers = await call(r.alpha, "list_peers", {});
     expect(peers.json["peers"]).toEqual([
-      { container: "beta", product: "codex", session: "b1", title: "Beta one", activity: "idle", needsApproval: false },
-      { container: "alpha", product: "claude", session: "a1", title: "Alpha one", activity: "idle", needsApproval: false },
+      { container: "beta", product: "codex", session: "b1", title: "Beta one", activity: "idle", offline: false, needsApproval: false },
+      { container: "alpha", product: "claude", session: "a1", title: "Alpha one", activity: "idle", offline: false, needsApproval: false },
     ].sort((x, y) => (x.container < y.container ? -1 : 1)));
 
     const sent = await call(r.alpha, "send", { ...SEND, body: "What is 6 times 7?" });

@@ -22,7 +22,11 @@ export type Deps = {
   readonly newId: () => string;
   /** How long a handed-out message may wait for its outcome before it goes back to the queue. */
   readonly deliveryTimeoutMs: number;
+  /** How long a container's adapter may stay disconnected before its sessions are shown as unknown and get nothing pushed. */
+  readonly offlineAfterMs?: number;
 };
+
+export const OFFLINE_AFTER_MS = 90_000;
 
 /** Who the caller says it is. The session is a claim; the container is not. */
 export type Claim = { readonly session: string; readonly title: string | null };
@@ -41,7 +45,10 @@ export type PeerView = {
   readonly product: Product;
   readonly session: string;
   readonly title: string | null;
+  /** `unknown` while the container's adapter is offline, whatever it last reported. */
   readonly activity: Peer["activity"];
+  /** True when the container's adapter has been disconnected for longer than the broker waits: what is shown may be old and nothing is pushed. */
+  readonly offline: boolean;
   /** Whether a person has to approve a message to this peer before it goes. */
   readonly needsApproval: boolean;
 };
@@ -72,6 +79,9 @@ export type Service = {
   readonly listPeers: (caller: string) => readonly PeerView[] | Forbidden;
   readonly send: (caller: string, claim: Claim, to: Target, body: string) => Submitted;
   readonly reply: (caller: string, claim: Claim, messageId: string, body: string) => Submitted;
+  /** The adapter's stream for this container is open, or has just closed. Only the transport knows. */
+  readonly streamOpened: (container: string) => void;
+  readonly streamClosed: (container: string) => void;
   readonly inbox: (caller: string, session: string) => { readonly kind: "ok"; readonly messages: readonly Pulled[] } | Forbidden;
   readonly report: (caller: string, report: AdapterReport) => { readonly kind: "ok" } | { readonly kind: "wrong-product" } | Forbidden;
   readonly nextFor: (container: string) => readonly HandOut[];
@@ -88,6 +98,15 @@ const keyOf = (a: Address): string => `${a.container}\u0000${a.product}\u0000${a
 export function makeService(deps: Deps): Service {
   const { store, policy, products, now, newId } = deps;
   const { limits } = policy;
+  const offlineAfter = deps.offlineAfterMs ?? OFFLINE_AFTER_MS;
+  // When each container's stream last closed, or null while it is open. A container never seen since this broker started counts from its start,
+  // so peers left in the store by an earlier run go offline too if the adapter does not come back.
+  const startedAt = now();
+  const closedAt = new Map<string, number | null>();
+  const offline = (container: string): boolean => {
+    const since = closedAt.get(container);
+    return since !== null && now() - (since ?? startedAt) > offlineAfter;
+  };
   // What each adapter last said its product can do. Memory only: an adapter reports again whenever it connects.
   const capabilities = new Map<string, Capabilities>();
 
@@ -152,7 +171,11 @@ export function makeService(deps: Deps): Service {
       store.apply(t.message.id, { kind: "refuse", reason: { kind: "policy", rule: decision.rule } }, at);
       return { go: false };
     }
-    // `ask` is let through: a queued message was approved already, and the state machine cannot hold it a second time.
+    // A rule that let the message in may say `ask` by now. A person who already said yes to this message is not asked again.
+    if (decision.decision === "ask" && !store.wasApproved(t.message.id)) {
+      store.apply(t.message.id, { kind: "hold" }, at);
+      return { go: false };
+    }
     return { go: true, wake: decision.wake };
   }
 
@@ -188,7 +211,8 @@ export function makeService(deps: Deps): Service {
       return store.peers().flatMap((p): PeerView[] => {
         const decision = decide(policy, from, p).decision;
         if (decision === "deny") return [];
-        return [{ container: p.container, product: p.product, session: p.session, title: p.title, activity: p.activity, needsApproval: decision === "ask" }];
+        const away = offline(p.container);
+        return [{ container: p.container, product: p.product, session: p.session, title: p.title, activity: away ? "unknown" : p.activity, offline: away, needsApproval: decision === "ask" }];
       });
     },
 
@@ -229,6 +253,13 @@ export function makeService(deps: Deps): Service {
       return { kind: "ok", messages: pulled };
     },
 
+    streamOpened: (container) => {
+      closedAt.set(container, null);
+    },
+    streamClosed: (container) => {
+      closedAt.set(container, now());
+    },
+
     report: (caller, report) => {
       const product = products.get(caller);
       if (product === undefined) return { kind: "forbidden" };
@@ -247,7 +278,7 @@ export function makeService(deps: Deps): Service {
     nextFor: (container) => {
       const product = products.get(container);
       const caps = capabilities.get(container);
-      if (product === undefined || caps === undefined || !caps.push || store.stopped()) return [];
+      if (product === undefined || caps === undefined || !caps.push || store.stopped() || offline(container)) return [];
       const at = now();
       const peers = store.peers().filter((p) => p.container === container && p.product === product);
       const inFlight = new Map<string, boolean>();

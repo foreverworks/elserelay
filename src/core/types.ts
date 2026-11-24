@@ -110,6 +110,12 @@ export type Policy = {
   readonly limits: Limits;
 };
 
+/** An operator's stop or start, kept beside the message audit and as hard to change. */
+export type ControlEntry = {
+  readonly at: number;
+  readonly action: "stop" | "start";
+};
+
 export type AuditEntry = {
   readonly at: number;
   readonly message: string;

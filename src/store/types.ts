@@ -2,7 +2,7 @@
  * What the broker keeps. Every change to a message goes through `apply`, which
  * writes the new state and its audit entry in one transaction.
  */
-import type { Address, AuditEntry, Event, Message, Peer, Tracked } from "../core/types.js";
+import type { Address, AuditEntry, ControlEntry, Event, Message, Peer, Tracked } from "../core/types.js";
 
 export type Store = {
   /** A new message, in state `received`, with its audit entry. */
@@ -10,6 +10,8 @@ export type Store = {
   /** Null when there is no such message; throws when the event is not legal in its state. */
   readonly apply: (id: string, event: Event, at: number) => Tracked | null;
   readonly get: (id: string) => Tracked | null;
+  /** Whether a person (or the approver) has already said yes to this message. */
+  readonly wasApproved: (id: string) => boolean;
   /** Queued messages for a container, oldest first. */
   readonly queued: (container: string) => readonly Tracked[];
   /** Messages out with an adapter since before `before`, whose outcome never came. */
@@ -27,7 +29,10 @@ export type Store = {
   readonly reportPeers: (container: string, product: Peer["product"], peers: readonly Peer[]) => void;
   readonly peers: () => readonly Peer[];
   readonly stopped: () => boolean;
+  /** Records the switch in the control log, whether or not it changed anything. */
   readonly setStopped: (stopped: boolean, at: number) => void;
   readonly audit: (since: number) => readonly AuditEntry[];
+  /** Every stop and start since `since`, oldest first. */
+  readonly controlAudit: (since: number) => readonly ControlEntry[];
   readonly close: () => void;
 };

@@ -32,7 +32,7 @@ const REPORT = JSON.stringify({ product: "claude", capabilities: { push: true, w
 
 describe("the adapter channel", () => {
   it("answers 401 without a token and with a wrong one, on every route", async () => {
-    for (const path of ["/adapter/stream", "/adapter/report", "/adapter/outcome"]) {
+    for (const path of ["/adapter/stream", "/adapter/report", "/adapter/outcome", "/adapter/inbox"]) {
       const method = path === "/adapter/stream" ? "GET" : "POST";
       expect(await status(path, { method })).toBe(401);
       expect(await status(path, { method, headers: bearer("not-a-token-0123456789") })).toBe(401);
@@ -44,6 +44,7 @@ describe("the adapter channel", () => {
     expect(await status("/adapter/stream", { headers: bearer(TOKENS["ghost"] ?? "") })).toBe(403);
     expect(await post("/adapter/report", TOKENS["ghost"], REPORT)).toBe(403);
     expect(await post("/adapter/outcome", TOKENS["ghost"], "{}")).toBe(403);
+    expect(await post("/adapter/inbox", TOKENS["ghost"], '{"session":"s"}')).toBe(403);
   });
 
   it("answers 403 to a report that names another product than the container's", async () => {
@@ -67,6 +68,40 @@ describe("the adapter channel", () => {
   it("answers 204 to an outcome nobody is waiting for", async () => {
     const body = JSON.stringify({ id: "unknown", attempt: 1, result: { ok: true, certainty: "confirmed" } });
     expect(await post("/adapter/outcome", TOKENS["alpha"], body)).toBe(204);
+  });
+
+  it("answers /adapter/inbox with the texts waiting for the session, once, and 400 and 405 for a bad call", async () => {
+    const beta = await fakeAdapter(h, "beta");
+    await beta.post("/adapter/report", {
+      product: "codex",
+      capabilities: { push: false, wakesIdle: false, joinsTurn: false, certainty: "accepted" },
+      sessions: [{ session: "pull-1", title: null, activity: "idle" }],
+    });
+    const alpha = await mcpClient(h, "alpha");
+    const sent = await call(alpha, "send", { to_container: "beta", to_session: "pull-1", body: "pull me", session: "a1" });
+    expect(sent.isError).toBe(false);
+    const ask = (token: string | undefined, body: string): Promise<Response> =>
+      fetch(adapterUrl(h, "/adapter/inbox"), { method: "POST", headers: { ...(token === undefined ? {} : bearer(token)), "content-type": "application/json" }, body });
+
+    const res = await ask(TOKENS["beta"], '{"session":"pull-1"}');
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const answer = (await res.json()) as { messages: string[] };
+    expect(answer.messages).toHaveLength(1);
+    expect(answer.messages[0]).toContain("pull me");
+    expect(answer.messages[0]).toContain('Container: "alpha" (verified by the gateway)');
+    expect(await (await ask(TOKENS["beta"], '{"session":"pull-1"}')).json()).toEqual({ messages: [] });
+    // Another container's token reaches only its own sessions.
+    expect(await (await ask(TOKENS["alpha"], '{"session":"pull-1"}')).json()).toEqual({ messages: [] });
+
+    for (const body of ["not json", "{}", '{"session":""}', '{"session":"s","extra":1}']) {
+      const bad = await ask(TOKENS["beta"], body);
+      await bad.arrayBuffer();
+      expect(bad.status, body).toBe(400);
+    }
+    expect(await status("/adapter/inbox", { headers: bearer(TOKENS["beta"] ?? "") })).toBe(405);
+    beta.close();
+    await alpha.close();
   });
 
   it("replaces an open stream when the same container opens a second", async () => {
@@ -134,5 +169,47 @@ describe("the MCP door", () => {
     adapter.close();
     await alpha.close();
     await beta.close();
+  });
+});
+
+describe("an adapter whose stream closed", () => {
+  it("is shown as offline after 90 seconds, pushed nothing, and back when it reconnects", async () => {
+    const clock = { t: 1_000_000 };
+    const offline = await startHarness({ policy: ALLOW_ALL, effects: { now: () => clock.t } });
+    try {
+      const a = await fakeAdapter(offline, "alpha");
+      const b = await fakeAdapter(offline, "beta");
+      await a.report("claude", [{ session: "a1", title: null, activity: "idle" }]);
+      await b.report("codex", [{ session: "b1", title: null, activity: "idle" }]);
+      const alpha = await mcpClient(offline, "alpha");
+      const peersOf = async (): Promise<unknown> => {
+        const peers = (await call(alpha, "list_peers", {})).json["peers"] as { container: string; session: string; activity: string; offline: boolean }[];
+        return peers.filter((p) => p.container === "beta").map((p) => [p.session, p.activity, p.offline]);
+      };
+      expect(await peersOf()).toEqual([["b1", "idle", false]]);
+
+      b.close();
+      // The broker notices the close on its own time, so the clock moves on until it has: the close is stamped with the clock as it is then.
+      await waitFor("the broker to see the stream close", () => {
+        clock.t += 91_000;
+        const peers = offline.running.service.listPeers("alpha");
+        return Array.isArray(peers) && peers.some((p) => p.container === "beta" && p.offline);
+      });
+      expect(await peersOf()).toEqual([["b1", "unknown", true]]);
+
+      const sent = await call(alpha, "send", { to_container: "beta", to_session: "b1", body: "while away", session: "a1" });
+      expect(sent.isError).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(offline.running.store.get(String(sent.json["id"]))?.state).toBe("queued");
+
+      const back = await fakeAdapter(offline, "beta");
+      await waitFor("the message to go to the reconnected adapter", () => back.deliveries.length === 1);
+      expect(await peersOf()).toEqual([["b1", "idle", false]]);
+      back.close();
+      a.close();
+      await alpha.close();
+    } finally {
+      await offline.close();
+    }
   });
 });

@@ -8,8 +8,8 @@ import { clientFor, pathnameOf, plainReply, readRawBody } from "@foreverworks/mc
 import type { ClientTokens } from "@foreverworks/mcp-kit";
 import { z } from "zod";
 import { PRODUCTS } from "../core/types.js";
-import { OUTCOME_PATH, REPORT_PATH, STREAM_PATH } from "../wire.js";
-import type { AdapterReport, Outcome, ToAdapter } from "../wire.js";
+import { INBOX_PATH, OUTCOME_PATH, REPORT_PATH, STREAM_PATH } from "../wire.js";
+import type { AdapterReport, InboxAnswer, InboxRequest, Outcome, ToAdapter } from "../wire.js";
 import type { Service } from "./service.js";
 
 /** Runs `fn` every `ms` until the returned function is called. The only timer the broker needs. */
@@ -37,6 +37,8 @@ const outcomeSchema = z.strictObject({
     z.strictObject({ ok: z.literal(false), retry: z.boolean(), detail: z.string().max(2000) }),
   ]),
 });
+
+const inboxSchema = z.strictObject({ session: text });
 
 export type Channel = {
   readonly handle: (req: IncomingMessage, res: ServerResponse) => void;
@@ -71,7 +73,10 @@ export function makeChannel(deps: ChannelDeps): Channel {
 
   const drop = (container: string, stream: Stream): void => {
     stream.stop();
-    if (streams.get(container) === stream) streams.delete(container);
+    if (streams.get(container) === stream) {
+      streams.delete(container);
+      service.streamClosed(container);
+    }
   };
 
   const pump = (container: string): void => {
@@ -86,6 +91,7 @@ export function makeChannel(deps: ChannelDeps): Channel {
     const previous = streams.get(container);
     const stream: Stream = { res, stop: every(pingMs, () => write(stream, { kind: "ping" })) };
     streams.set(container, stream);
+    service.streamOpened(container);
     // A second stream from the same container replaces the first: the adapter that dialled again is the live one.
     if (previous !== undefined) {
       previous.stop();
@@ -119,7 +125,7 @@ export function makeChannel(deps: ChannelDeps): Channel {
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = pathnameOf(req.url);
-    if (path !== STREAM_PATH && path !== REPORT_PATH && path !== OUTCOME_PATH) return plainReply(res, 404, "not found");
+    if (path !== STREAM_PATH && path !== REPORT_PATH && path !== OUTCOME_PATH && path !== INBOX_PATH) return plainReply(res, 404, "not found");
 
     const container = clientFor(req.headers.authorization, tokens);
     if (container === undefined) return plainReply(res, 401, "a bearer token is required", { "www-authenticate": "Bearer" });
@@ -140,6 +146,17 @@ export function makeChannel(deps: ChannelDeps): Channel {
       if (result.kind !== "ok") return plainReply(res, 403, "this token's container runs another product");
       res.writeHead(204).end();
       pump(container);
+      return;
+    }
+
+    if (path === INBOX_PATH) {
+      const body = await readJson(req, res, inboxSchema);
+      if (body === undefined) return;
+      const request: InboxRequest = body;
+      const result = service.inbox(container, request.session);
+      if (result.kind !== "ok") return plainReply(res, 403, "this token's container is not configured");
+      const answer: InboxAnswer = { messages: result.messages.map((m) => m.text) };
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(answer));
       return;
     }
 

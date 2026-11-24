@@ -173,6 +173,27 @@ describe("run", () => {
     expect(await s.stop()).toEqual({ reason: "stopped" });
   });
 
+  it("keeps the last report when the driver cannot list, and logs the same failure once", async () => {
+    const b = await broker();
+    const fake = makeFake({ ...emptyFake, sessions: [s1] });
+    let broken = false;
+    const driver = { ...fake.driver, list: async () => { if (broken) throw new Error("app-server unreachable"); return fake.driver.list(); } };
+    const logs: string[] = [];
+    const s = await start(b, fake, { driver, log: (l) => logs.push(l) });
+    await until(() => b.reports.length === 1, "first report");
+    broken = true;
+    await new Promise((r) => setTimeout(r, 150));
+    expect(b.reports).toHaveLength(1);
+    expect(logs.filter((l) => l.includes("could not list sessions"))).toEqual(["could not list sessions: app-server unreachable"]);
+    broken = false;
+    fake.update((st) => ({ ...st, sessions: [s1, s2] }));
+    await until(() => b.reports.length === 2, "report after recovery");
+    expect(b.reports[1]?.sessions).toEqual([s1, s2]);
+    broken = true;
+    await until(() => logs.filter((l) => l.includes("could not list sessions")).length === 2, "a second log line after recovery");
+    await s.stop();
+  });
+
   it("posts the report again when the list changes, and only then", async () => {
     const b = await broker();
     const fake = makeFake({ ...emptyFake, sessions: [s1] });
