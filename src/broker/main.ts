@@ -54,8 +54,12 @@ export type Running = {
   readonly close: () => Promise<void>;
 };
 
+/** Set by the bundle, which is one file with no package.json beside it (scripts/bundle.ts). */
+declare const ELSERELAY_VERSION: string | undefined;
+
 // Both the source and the built file sit two folders below the package root.
 const version = (): string => {
+  if (typeof ELSERELAY_VERSION !== "undefined") return ELSERELAY_VERSION;
   const pkg: unknown = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
   return typeof pkg === "object" && pkg !== null && "version" in pkg && typeof pkg.version === "string" ? pkg.version : "0.0.0";
 };

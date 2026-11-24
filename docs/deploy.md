@@ -229,6 +229,8 @@ Environment=ELSERELAY_PRODUCT=claude
 Environment=ELSERELAY_TOKEN_FILE=%d/token
 Environment=ELSERELAY_STATE_DIR=%S/elserelay-adapter
 ExecStart=/usr/bin/node /opt/elserelay/dist/cli.js adapter
+# or, from the single file of a release (see the README), with no npm and no node_modules:
+# ExecStart=/usr/bin/node /opt/elserelay/elserelay.mjs adapter
 Restart=on-failure
 RestartSec=5
 

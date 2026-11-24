@@ -73,6 +73,12 @@ ELSERELAY_URL=... ELSERELAY_TOKEN_FILE=... ELSERELAY_PRODUCT=claude \
   ELSERELAY_STATE_DIR=... elserelay adapter   # beside each agent, as its user
 ```
 
+For the machine beside an agent, which needs no npm and no clone: download
+`elserelay.mjs` (and `elserelay.mjs.sha256`) from the
+[releases page](https://github.com/foreverworks/elserelay/releases), check it with
+`sha256sum -c elserelay.mjs.sha256`, and run `node elserelay.mjs adapter` where the
+examples say `elserelay adapter`. It is one file and runs on Node 22 or later.
+
 The broker has two ports, one for the agents and one for the adapters: 7410 and 7411
 in the examples. `ELSERELAY_URL` is the adapters' one. Register
 `http://<broker>:7410/mcp`, with the container's token as the bearer, as an MCP server
