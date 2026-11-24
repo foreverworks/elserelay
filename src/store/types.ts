@@ -34,6 +34,8 @@ export type Store = {
    * Settled messages are never read, however many there are.
    */
   readonly pullable: (to: Address, pulledBefore: number) => readonly Tracked[];
+  /** Whether a message to this session is out with an adapter (delivering, and not pulled) right now. Reads one row at most. */
+  readonly hasDelivering: (to: Address) => boolean;
   readonly markRead: (to: Address, ids: readonly string[], at: number) => void;
   readonly thread: (thread: string) => readonly Tracked[];
   /** Messages from one container to another received since `since`, refused ones left out. */

@@ -281,6 +281,24 @@ describe("inbox and markRead", () => {
   });
 });
 
+describe("hasDelivering", () => {
+  it("is true only for a message out with an adapter to that session, not a pulled, queued or settled one", () => {
+    expect(store.hasDelivering(addr("beta"))).toBe(false);
+    for (const id of ["queued", "pulled", "settled"]) store.receive(message(id), 1);
+    store.apply("queued", events.queue, 2);
+    store.apply("pulled", events.queue, 2);
+    store.apply("pulled", events.pull, 3);
+    handOut("settled");
+    store.apply("settled", events.deliver, 14);
+    expect(store.hasDelivering(addr("beta"))).toBe(false);
+    store.receive(message("out"), 1);
+    handOut("out", 20);
+    expect(store.hasDelivering(addr("beta"))).toBe(true);
+    expect(store.hasDelivering(addr("beta", "other"))).toBe(false);
+    expect(store.hasDelivering(addr("gamma"))).toBe(false);
+  });
+});
+
 describe("pullable", () => {
   const ids = (pulledBefore: number): string[] => store.pullable(addr("beta"), pulledBefore).map((t) => t.message.id);
 
@@ -570,6 +588,9 @@ describe("a store file", () => {
     const pullable = plan(path, SQL.pullable, "beta", "fake", "s1", 0);
     expect(pullable).toContain("messages_pullable");
     expect(pullable).not.toMatch(/SCAN m\b/);
+    const delivering = plan(path, SQL.delivering, "beta", "fake", "s1");
+    expect(delivering).toContain("messages_pullable");
+    expect(delivering).not.toMatch(/SCAN messages/);
   });
 
   it("the refusal notices refuse UPDATE and DELETE like the control log", () => {

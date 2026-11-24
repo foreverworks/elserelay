@@ -288,6 +288,9 @@ export const SQL = {
     AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id = m.id) ORDER BY m.created_at, m.rowid`,
   lastReceived: `SELECT * FROM messages WHERE to_container = ? AND to_product = ? AND to_session = ? AND from_container = ?
     AND state IN ('delivering', 'delivered') AND first_handed_at >= ? ORDER BY first_handed_at DESC, rowid DESC LIMIT 1`,
+  // The state test is written out beside the equality so the partial index `messages_pullable` applies.
+  delivering: `SELECT 1 AS yes FROM messages WHERE to_container = ? AND to_product = ? AND to_session = ?
+    AND state IN ('queued', 'delivering') AND state = 'delivering' AND pulled = 0 LIMIT 1`,
   pulls: "SELECT COUNT(*) AS n FROM audit WHERE message = ? AND event = 'pull'",
 } as const;
 
@@ -328,6 +331,7 @@ export function openStore(path: string): Store {
   const countSent = prepare(
     "SELECT COUNT(*) AS n FROM messages WHERE from_container = ? AND to_container = ? AND received_at >= ? AND state != 'refused'",
   );
+  const selectDelivering = prepare(SQL.delivering);
   const selectLastReceived = prepare(SQL.lastReceived);
   const markHanded = prepare("UPDATE messages SET first_handed_at = ? WHERE id = ? AND first_handed_at IS NULL");
   const countRefused = prepare("SELECT COUNT(*) AS n FROM messages WHERE from_container = ? AND state = 'refused' AND received_at >= ?");
@@ -400,6 +404,8 @@ export function openStore(path: string): Store {
     expired: (at) => all(selectExpired, at).map(toTracked),
     inbox: (to) => all(selectInbox, to.container, to.product, to.session).map(toTracked),
     pullable: (to, pulledBefore) => all(selectPullable, to.container, to.product, to.session, pulledBefore).map(toTracked),
+
+    hasDelivering: (to) => selectDelivering.get(to.container, to.product, to.session) !== undefined,
 
     markRead: (to, ids, at) =>
       inTransaction(db, () => {

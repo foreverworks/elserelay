@@ -352,6 +352,19 @@ describe("the agent-gateway program", () => {
     expect(run.ms).toBeLessThan(5500);
   }, 30_000);
 
+  it("hook claude and hook codex: the built program answers from stdin alone, with no settings and no broker", async () => {
+    const input = JSON.stringify({ session_id: "sid-1", tool_name: "mcp__gateway__inbox", tool_input: { received: [] } });
+    const claude = await bin(["hook", "claude"], {}, input);
+    expect(claude).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(claude.stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: { received: [], session: "sid-1" } } });
+    const codex = await bin(["hook", "codex"], { GATEWAY_HOOK_SERVER: "gateway" }, input);
+    expect(JSON.parse(codex.stdout).hookSpecificOutput.permissionDecision).toBe("allow");
+    const other = await bin(["hook", "codex"], {}, JSON.stringify({ session_id: "s", tool_name: "Bash", tool_input: { command: "ls" } }));
+    expect(other).toMatchObject({ code: 0, stdout: "", stderr: "" });
+    const garbage = await bin(["hook", "claude"], {}, "not json");
+    expect(garbage).toMatchObject({ code: 0, stdout: "", stderr: "" });
+  }, 30_000);
+
   it("adapter: refuses to start without its settings", async () => {
     const run = await bin(["adapter"], {}, null);
     expect(run.code).toBe(2);

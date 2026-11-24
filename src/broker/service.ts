@@ -232,7 +232,7 @@ export function makeService(deps: Deps): Service {
   }
 
   // A message a session pulled does not block the push path: it ends by its own acknowledgement or by expiry.
-  const hasDelivering = (to: Address): boolean => store.inbox(to).some((t) => t.state === "delivering" && !t.pulled);
+  const hasDelivering = (to: Address): boolean => store.hasDelivering(to);
 
   /** Writes only if the message is still as `t` showed it: the push path and the clock must not undo a newer answer. */
   function refuseOrRetry(t: Tracked, reason: Reason, at: number): void {

@@ -67,6 +67,13 @@ by the broker's config, not by what an adapter reports: a token whose label the
 config does not list, or a report naming another product than its container's,
 is refused with a 403.
 
+An optional PreToolUse hook (`agent-gateway hook claude` or `hook codex`, in
+docs/hooks.md) fills the `session` argument of the gateway's tools with the id
+the product itself reports for the calling session. That makes the claim right
+by default, so a model cannot mistype it or name another session by accident.
+It is not a security boundary: the hook runs as the same user as the agent, and
+the session stays a claim.
+
 A sender is told as little as the policy allows. A refusal by policy says that
 no rule lets it message that session and never names the rule, which the
 operator reads in the audit. A message to a container the broker does not know

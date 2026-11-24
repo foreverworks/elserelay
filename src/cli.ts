@@ -30,6 +30,10 @@ export async function runCli(argv: readonly string[], env: Readonly<Record<strin
       err: io.err,
     });
   }
+  if (command === "hook" && (product === "claude" || product === "codex") && rest.length === 0) {
+    const { runIdentityHook } = await import("./hook/identity.js");
+    return runIdentityHook(product, { env, readStdin: io.stdin ?? (async () => ""), out: (text) => io.out(text) });
+  }
   if (command === "adapter" && argv.length === 1) {
     const { runAdapter } = await import("./adapter/main.js");
     return runAdapter(env);
