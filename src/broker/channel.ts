@@ -17,6 +17,7 @@ export type Every = (ms: number, fn: () => void) => () => void;
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const PING_MS = 20_000;
+export const HEALTH_PATH = "/healthz";
 
 const text = z.string().min(1).max(200);
 const certainty = z.enum(["confirmed", "accepted"]);
@@ -129,6 +130,11 @@ export function makeChannel(deps: ChannelDeps): Channel {
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = pathnameOf(req.url);
+    // A liveness probe: no token, and nothing in the answer that says anything about the gateway.
+    if (path === HEALTH_PATH) {
+      if (req.method !== "GET" && req.method !== "HEAD") return plainReply(res, 405, "use GET", { allow: "GET, HEAD" });
+      return plainReply(res, 200, "ok");
+    }
     if (path !== STREAM_PATH && path !== REPORT_PATH && path !== OUTCOME_PATH && path !== INBOX_PATH) return plainReply(res, 404, "not found");
 
     const container = clientFor(req.headers.authorization, tokens);

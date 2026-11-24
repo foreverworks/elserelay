@@ -34,6 +34,10 @@ export async function runCli(argv: readonly string[], env: Readonly<Record<strin
     const { runIdentityHook } = await import("./hook/identity.js");
     return runIdentityHook(product, { env, readStdin: io.stdin ?? (async () => ""), out: (text) => io.out(text) });
   }
+  if (command === "health") {
+    const { runHealth } = await import("./health.js");
+    return runHealth(argv.slice(1), env, { fetch, err: io.err });
+  }
   if (command === "adapter" && argv.length === 1) {
     const { runAdapter } = await import("./adapter/main.js");
     return runAdapter(env);
@@ -57,8 +61,9 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathS
     stdin: readStdin,
   }).then((code) => {
     process.exitCode = code;
-    // A hook's stdin may stay open after its output; nothing may hold the agent up.
-    if (process.argv[2] === "hook") {
+    // A hook's stdin may stay open after its output; nothing may hold the agent up. The same goes for the short commands
+    // that a supervisor waits on: an idle connection must not keep them from ending.
+    if (process.argv[2] === "hook" || process.argv[2] === "health") {
       process.stdin.destroy();
       setTimeout(() => process.exit(code), 500).unref();
     }
