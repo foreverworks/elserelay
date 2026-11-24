@@ -30,7 +30,13 @@ export type Deps = {
 export const OFFLINE_AFTER_MS = 90_000;
 
 /** A `send` continues the hop count of what its session was handed by the target container within this time. */
-export const HOP_MEMORY_MS = 3_600_000;
+export const HOP_MEMORY_MS = 600_000;
+
+/** A message nobody acknowledges is returned this many times; the next time it is settled as delivered with certainty `accepted`. */
+export const MAX_RETURNS = 3;
+
+/** The most messages one `inbox` call hands out; the rest wait for the next call. */
+export const MAX_INBOX_MESSAGES = 50;
 
 const RETURNED_LINE = "This message was given to you before and has not been confirmed as read. Pass its id in `received` on your next inbox call so it is not returned again.";
 
@@ -169,7 +175,8 @@ export function makeService(deps: Deps): Service {
       if (store.stopped()) return refusal({ kind: "stopped" });
       if (!listed(to)) return refusal({ kind: "unknown-peer" });
       const over = limitReason(limits, { hop: link.hop, bodyChars: facts.chars, sentInWindow });
-      if (over !== null) return refusal(over);
+      // The count of a `send` comes from a message its session was handed, which the sender may not connect with a thread: the reason says so.
+      if (over !== null) return refusal(over.kind === "hops" && link.replyTo === null ? { ...over, sendWindowMs: HOP_MEMORY_MS } : over);
       return { kind: "go", state: decision.decision === "ask" ? "held" : "queued" };
     })();
 
@@ -315,7 +322,13 @@ export function makeService(deps: Deps): Service {
         const fresh = t.state === "queued" && t.reason?.kind !== "no-outcome";
         const again = t.state === "delivering" && t.pulled && t.updatedAt + deps.deliveryTimeoutMs <= at;
         if (!fresh && !again) continue;
+        if (pulled.length >= MAX_INBOX_MESSAGES) break;
         if (!screen(t, at).go) continue;
+        // The first pull is not a return. A message that keeps coming back unconfirmed is settled instead of returned for ever.
+        if (again && store.pullsOf(t.message.id) - 1 >= MAX_RETURNS) {
+          store.applyIf(t.message.id, { kind: "deliver", certainty: "accepted" }, at, t);
+          continue;
+        }
         if (store.applyIf(t.message.id, { kind: "pull" }, at, t) === null) continue;
         pulled.push({ id: t.message.id, text: again ? `${RETURNED_LINE}\n\n${render(t.message)}` : render(t.message) });
       }

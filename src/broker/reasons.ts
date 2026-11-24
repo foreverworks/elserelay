@@ -11,7 +11,9 @@ export function reasonText(reason: Reason): string {
     case "approver":
       return reason.answer === "no" ? "a person refused it" : "no person answered in time";
     case "hops":
-      return `this thread already has ${reason.limit} replies, the most allowed`;
+      return reason.sendWindowMs === undefined
+        ? `this thread already has ${reason.limit} replies, the most allowed`
+        : `this session was answering a recent message from that container, and a chain of messages may not pass ${reason.limit}; this is not a limit on a thread of yours. For a new topic, wait ${Math.ceil(reason.sendWindowMs / 60_000)} minutes after that message`;
     case "rate":
       return `more than ${reason.limit} messages between these containers within ${Math.round(reason.windowMs / 60_000)} minutes`;
     case "stopped":

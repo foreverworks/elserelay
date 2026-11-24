@@ -55,16 +55,16 @@ describe("1. hops count through send", () => {
     expect(r.store.get(back)?.message.hop).toBe(1);
   });
 
-  it("forgets after an hour, and ignores other sessions, other containers and messages that never reached the session", () => {
+  it("forgets after ten minutes, and ignores other sessions, other containers and messages that never reached the session", () => {
     const r = make();
     accepted(r.service.send("alpha", alpha, to(), "ping"));
     deliverAll(r, "beta");
     expect(r.store.get(accepted(r.service.send("beta", beta("b3"), to("a1", "alpha"), "other session")))?.message.hop).toBe(0);
     expect(r.store.get(accepted(r.service.send("beta", beta(), to("a1", "alpha"), "same session")))?.message.hop).toBe(1);
-    r.clock.t += 3_600_000;
-    expect(r.store.get(accepted(r.service.send("beta", beta(), to("a1", "alpha"), "an hour later")))?.message.hop).toBe(1);
+    r.clock.t += 600_000;
+    expect(r.store.get(accepted(r.service.send("beta", beta(), to("a1", "alpha"), "ten minutes later")))?.message.hop).toBe(1);
     r.clock.t += 1;
-    expect(r.store.get(accepted(r.service.send("beta", beta(), to("a1", "alpha"), "past the hour")))?.message.hop).toBe(0);
+    expect(r.store.get(accepted(r.service.send("beta", beta(), to("a1", "alpha"), "past the window")))?.message.hop).toBe(0);
     // Handed to alpha by beta, not by gamma.
     deliverAll(r, "alpha");
     r.service.report("gamma", report("fake", [seen("g1")]));
@@ -264,7 +264,8 @@ describe("4. inbox hands out, then the session confirms", () => {
   it("is not counted as an attempt, so repeated returns never refuse it; only the expiry ends it", () => {
     const r = make({ ...ALLOW_ALL, limits: { maxAttempts: 1, messageTtlMs: 100_000 } }, 1000);
     const id = accepted(r.service.send("alpha", alpha, to("b2"), "one"));
-    for (let i = 0; i < 5; i++) {
+    // The first pull and the three returns that are allowed.
+    for (let i = 0; i < 4; i++) {
       expect(pulledIds(r)).toEqual([id]);
       r.clock.t += 1000;
       r.service.tick();

@@ -5,7 +5,8 @@
  *   GATEWAY_TOKEN_FILE  a file holding the container's bearer token
  *   GATEWAY_PRODUCT     claude, codex, antigravity, or fake for a try-out
  *   GATEWAY_STATE_DIR   where the delivered ids are kept
- *   GATEWAY_SESSIONS    optional, comma-separated session ids: the only sessions this adapter reports and delivers to
+ *   GATEWAY_SESSIONS    optional, session ids separated by commas or spaces: the only sessions this adapter reports and delivers to.
+ *                       Unset means every session; set but empty is an error, so a lost value never widens the list
  *   CODEX_SOCKET        codex only: the app-server's control socket
  *                       (default: $CODEX_HOME/app-server-control/app-server-control.sock)
  *   CODEX_HOME          where that default lives (default: ~/.codex)
@@ -34,7 +35,7 @@ const env = z.object({
   GATEWAY_STATE_DIR: z.string().min(1),
   GATEWAY_SESSIONS: z
     .string()
-    .transform((list) => list.split(",").map((id) => id.trim()).filter((id) => id !== ""))
+    .transform((list) => list.split(/[\s,]+/).filter((id) => id !== ""))
     .pipe(z.array(z.string()).min(1, "name at least one session id, or leave it unset"))
     .optional(),
   CODEX_SOCKET: z.string().min(1).optional(),
@@ -54,8 +55,9 @@ export type Config = {
 };
 
 export function readConfig(source: Readonly<Record<string, string | undefined>>, home: string = homedir()): Config | string {
-  // An empty variable is as good as an unset one, so a unit file may name it without a value.
-  const present = Object.fromEntries(Object.entries(source).filter(([, v]) => v !== undefined && v !== ""));
+  // An empty variable is as good as an unset one, so a unit file may name it without a value. The exception is the session list: an
+  // adapter that was meant to serve a few sessions must not serve all of them because the value was lost on the way.
+  const present = Object.fromEntries(Object.entries(source).filter(([k, v]) => v !== undefined && (v !== "" || k === "GATEWAY_SESSIONS")));
   const parsed = env.safeParse(present);
   if (!parsed.success) {
     return parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
@@ -71,6 +73,10 @@ export function readConfig(source: Readonly<Record<string, string | undefined>>,
     antigravityDb: e.ANTIGRAVITY_SUMMARIES_DB ?? defaultSummariesPath(home),
   };
 }
+
+/** What the adapter logs at start, so the operator can see at once whether the list was read as meant. */
+export const servingLine = (config: Config): string =>
+  config.sessions === null ? `serving every ${config.product} session` : `serving only these sessions: ${config.sessions.join(", ")}`;
 
 export function driverFor(config: Config, log: (line: string) => void): Driver {
   const driver = productDriver(config, log);
@@ -125,6 +131,7 @@ export async function runAdapter(source: Readonly<Record<string, string | undefi
   const log = (line: string): void => {
     process.stderr.write(`${new Date().toISOString()} ${line}\n`);
   };
+  log(servingLine(config));
   const stop = new AbortController();
   for (const s of ["SIGINT", "SIGTERM"] as const) process.once(s, () => stop.abort());
   const end = await run(

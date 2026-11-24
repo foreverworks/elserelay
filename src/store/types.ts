@@ -15,6 +15,8 @@ export type Store = {
    */
   readonly applyIf: (id: string, event: Event, at: number, read: Tracked) => Tracked | null;
   readonly get: (id: string) => Tracked | null;
+  /** How many times the message was handed out through `inbox`, counted from the audit. */
+  readonly pullsOf: (id: string) => number;
   /** Whether a person (or the approver) has already said yes to this message. */
   readonly wasApproved: (id: string) => boolean;
   /** Queued messages for a container, oldest first. */

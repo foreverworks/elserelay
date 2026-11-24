@@ -26,12 +26,17 @@ whether it may go, who it came from, and whether a person has to say yes first.
 - **One broker**, in a container of its own. It never connects to an agent.
 - **One adapter per agent container**, beside the CLI, never in front of it. It
   dials out to the broker, reports the sessions it sees, and delivers messages
-  through a driver. `GATEWAY_SESSIONS`, a comma-separated list of session ids,
-  is optional: when it is set the adapter reports only those sessions and
-  refuses a delivery to any other with `retry: false`, whatever the broker asks.
-  The list is the container's own, so it holds when the broker is wrong or
-  hostile. It limits the adapter, not the hook, which only pulls what the broker
-  holds for the conversation it is run for.
+  through a driver. `GATEWAY_SESSIONS`, a list of session ids separated by commas
+  or spaces, is optional: when it is set the adapter reports only those sessions
+  and refuses a delivery to any other with `retry: false`, whatever the broker
+  asks. Unset means every session; set but empty is an error, so a value lost on
+  the way never widens the list. The adapter logs the list it read when it
+  starts. The list is the container's own, so it holds when the broker is wrong
+  or hostile. It covers the adapter only, not the pull path: a session, or the
+  hook, asks the broker's `inbox` for the messages of a session id it names, and
+  the broker takes that id on the caller's word, since a session is a claim and
+  only the container is verified. A container that must not read another
+  session's messages needs a container of its own.
 - **One driver per product.** It knows how that product takes a message and
   holds no policy: `list`, `deliver`, `status`, `capabilities`.
 - **Agents speak MCP to the broker**: `list_peers`, `send`, `inbox`, `reply`. A
@@ -121,8 +126,13 @@ A message leaves in one of two ways, and `delivering` covers both.
   become `delivered`, with certainty `confirmed`, when the session passes their
   ids in `received` on its next `inbox` call, or answers them. A pulled message
   nobody confirmed comes back on the next `inbox` call after the delivery
-  timeout, with one line before it saying it was given before. Only its
-  expiry ends it. The push path never retries a pulled message and is not held
+  timeout, with one line before it saying it was given before. After it has
+  been returned 3 times (four times handed out in all) the next call settles it
+  as `delivered` with certainty `accepted`, so a session that never confirms is
+  not given the same message every minute for a day; its expiry ends it
+  otherwise. One `inbox` call hands out at most 50 messages, oldest first, and
+  the answer says when more may be waiting; the rest come with the next call,
+  and a confirmation takes at most 100 ids. The push path never retries a pulled message and is not held
   up by one.
 
 `inbox` does not hand out a message whose last push ended with no outcome: the
@@ -154,10 +164,12 @@ cold makes it read its whole context again.
 - **Hops:** a reply adds one to its thread's count; past the limit it is refused.
   They stop agents that loop by themselves, so they also count through `send`: a
   `send` from a session that was handed a message by the target container within
-  the last hour starts at that message's hop plus one, in a new thread, and is
-  refused past the limit like a reply. The session is a claim, so an agent in a
-  compromised container can start from zero by naming another one; the pair rate
-  below is the bound it cannot pass.
+  the last 10 minutes starts at that message's hop plus one, in a new thread, and
+  is refused past the limit like a reply. The refusal says that the session was
+  answering a recent message from that container, that the count is not one of
+  its own threads, and how long to wait before a new topic. The session is a
+  claim, so an agent in a compromised container can start from zero by naming
+  another one; the pair rate below is the bound it cannot pass.
 - **Rate:** messages per pair of containers in a sliding window.
 - **Refusals:** refused messages per sender container in a sliding window
   (`limits.refusals`, 60 an hour by default). Past it a refusal is not stored at

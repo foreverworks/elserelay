@@ -55,7 +55,8 @@ export type Certainty = "confirmed" | "accepted";
 export type Reason =
   | { readonly kind: "policy"; readonly rule: string | null }
   | { readonly kind: "approver"; readonly answer: "no" | "timeout" }
-  | { readonly kind: "hops"; readonly limit: number }
+  /** `sendWindowMs` is set when a `send` was stopped: the count came from a message its session was handed within that time. */
+  | { readonly kind: "hops"; readonly limit: number; readonly sendWindowMs?: number }
   | { readonly kind: "rate"; readonly limit: number; readonly windowMs: number }
   | { readonly kind: "stopped" }
   | { readonly kind: "cold" }

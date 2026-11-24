@@ -2,6 +2,7 @@ import { makeErrorKit, makeHandled, requestContext } from "@foreverworks/mcp-kit
 import type { McpServer, ToolPolicy } from "@foreverworks/mcp-kit";
 import { z } from "zod";
 import { reasonText, senderText } from "./reasons.js";
+import { MAX_INBOX_MESSAGES } from "./service.js";
 import type { Claim, Service, Submitted } from "./service.js";
 
 type AppError = {
@@ -117,13 +118,19 @@ export function registerTools(service: Service, onQueued: (container: string) =>
       "inbox",
       {
         description:
-          "Fetch messages that are waiting for your session and were not pushed to it. Pass `received`, the ids of what the previous call returned, so those count as delivered; a message you do not confirm is returned again after a while, marked as seen before. A message pushed to you is not repeated here.",
+          `Fetch messages that are waiting for your session and were not pushed to it. Pass "received", the ids of what the previous call returned, so those count as delivered; a message you do not confirm is returned again after a while, marked as seen before, and after a few returns it is counted as delivered. At most ${MAX_INBOX_MESSAGES} messages come back in one call: call again for the rest. A message pushed to you is not repeated here.`,
         inputSchema: { session, received: receivedIds },
       },
       handled(async (args: { session: string; received?: string[] | undefined }) => {
         const result = service.inbox(caller(), args.session, args.received);
         if (result.kind === "forbidden") return fail({ kind: "forbidden", message: "this token's container is not configured" });
-        return { messages: result.messages, note: result.messages.length === 0 ? "Nothing is waiting for this session." : undefined };
+        const note =
+          result.messages.length === 0
+            ? "Nothing is waiting for this session."
+            : result.messages.length >= MAX_INBOX_MESSAGES
+              ? "This is the most one call returns; more may be waiting. Call inbox again, passing the ids you have read in `received`."
+              : undefined;
+        return { messages: result.messages, note };
       }),
     );
 

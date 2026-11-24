@@ -119,7 +119,7 @@ BEGIN SELECT RAISE(ABORT, 'control log entries are never removed'); END;
 const reasonSchema: z.ZodType<Reason> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("policy"), rule: z.string().nullable() }),
   z.strictObject({ kind: z.literal("approver"), answer: z.enum(["no", "timeout"]) }),
-  z.strictObject({ kind: z.literal("hops"), limit: z.number() }),
+  z.strictObject({ kind: z.literal("hops"), limit: z.number(), sendWindowMs: z.number().exactOptional() }),
   z.strictObject({ kind: z.literal("rate"), limit: z.number(), windowMs: z.number() }),
   z.strictObject({ kind: z.literal("stopped") }),
   z.strictObject({ kind: z.literal("cold") }),
@@ -317,6 +317,7 @@ export function openStore(path: string): Store {
     "INSERT INTO control (name, value, at) VALUES ('stopped', ?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value, at = excluded.at",
   );
   const selectAudit = prepare("SELECT * FROM audit WHERE at >= ? ORDER BY id");
+  const countPulls = prepare("SELECT COUNT(*) AS n FROM audit WHERE message = ? AND event = 'pull'");
   const selectApproved = prepare("SELECT 1 AS yes FROM audit WHERE message = ? AND event = 'approve' LIMIT 1");
   const insertControl = prepare("INSERT INTO control_log (at, action) VALUES (?, ?)");
   const selectControl = prepare("SELECT at, action FROM control_log WHERE at >= ? ORDER BY id");
@@ -365,6 +366,7 @@ export function openStore(path: string): Store {
     applyIf: (id, event, at, read) => move(id, event, at, read),
 
     get: find,
+    pullsOf: (id) => z.object({ n: z.number() }).parse(countPulls.get(id)).n,
     wasApproved: (id) => selectApproved.get(id) !== undefined,
     queued: (container) => all(selectQueued, container).map(toTracked),
     overdue: (before) => all(selectOverdue, before).map(toTracked),
