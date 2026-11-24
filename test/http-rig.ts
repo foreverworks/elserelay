@@ -25,10 +25,18 @@ export type Harness = {
 };
 
 /** A real broker on free ports, with fast polling, in a temporary directory. */
-export async function startHarness(options: { readonly policy: unknown; readonly deliveryTimeoutMs?: number; readonly effects?: Partial<Effects> }): Promise<Harness> {
-  const dir = mkdtempSync(join(tmpdir(), "agw-"));
+export async function startHarness(options: {
+  readonly policy: unknown;
+  readonly deliveryTimeoutMs?: number;
+  readonly effects?: Partial<Effects>;
+  /** The approver section of the config. */
+  readonly approver?: unknown;
+  /** A directory that outlives the broker, for a test that starts a second broker on the same store; the harness does not remove it. */
+  readonly dir?: string;
+}): Promise<Harness> {
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "agw-"));
   const tokensDir = join(dir, "tokens");
-  mkdirSync(tokensDir);
+  mkdirSync(tokensDir, { recursive: true });
   for (const [label, token] of Object.entries(TOKENS)) writeFileSync(join(tokensDir, `token-${label}`), token);
   const raw = {
     store: join(dir, "broker.sqlite"),
@@ -37,6 +45,7 @@ export async function startHarness(options: { readonly policy: unknown; readonly
     containers: { alpha: { product: "claude" }, beta: { product: "codex" } },
     deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000,
     pollMs: 25,
+    ...(options.approver === undefined ? {} : { approver: options.approver }),
     policy: options.policy,
   };
   const configPath = join(dir, "config.json");
@@ -52,7 +61,7 @@ export async function startHarness(options: { readonly policy: unknown; readonly
     lines,
     close: async () => {
       await running.close();
-      rmSync(dir, { recursive: true, force: true });
+      if (options.dir === undefined) rmSync(dir, { recursive: true, force: true });
     },
   };
 }

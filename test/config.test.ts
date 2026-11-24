@@ -54,6 +54,32 @@ describe("parseConfig", () => {
   });
 });
 
+describe("the approver section", () => {
+  const withApprover = (approver: unknown) => parseConfig({ ...base, approver });
+
+  it("is the command line when left out", () => {
+    const r = parseConfig(base);
+    expect(r.ok && r.config.approver).toEqual({ kind: "cli" });
+    expect(withApprover({ kind: "cli" }).ok).toBe(true);
+  });
+
+  it("takes a command with its arguments, an optional state directory and the names to pass through", () => {
+    const r = withApprover({ kind: "command", argv: ["agent-gateway", "approver", "elsewire"], stateDir: "/data/approver", passEnv: ["ELSEWIRE_URL"] });
+    expect(r.ok && r.config.approver).toEqual({ kind: "command", argv: ["agent-gateway", "approver", "elsewire"], stateDir: "/data/approver", passEnv: ["ELSEWIRE_URL"] });
+    const bare = withApprover({ kind: "command", argv: ["/usr/local/bin/ask"] });
+    expect(bare.ok && bare.config.approver).toEqual({ kind: "command", argv: ["/usr/local/bin/ask"], passEnv: [] });
+  });
+
+  it("refuses an empty command, an empty program, a bad variable name, other kinds and stray keys", () => {
+    expect(problems({ ...base, approver: { kind: "command", argv: [] } })[0]).toContain("approver.argv");
+    expect(problems({ ...base, approver: { kind: "command", argv: [""] } })[0]).toContain("approver.argv");
+    expect(problems({ ...base, approver: { kind: "command", argv: ["x"], passEnv: ["A=B"] } })[0]).toContain("approver.passEnv");
+    expect(problems({ ...base, approver: { kind: "email" } })[0]).toContain("approver");
+    expect(problems({ ...base, approver: { kind: "command", argv: ["x"], shell: true } })[0]).toContain("approver");
+    expect(problems({ ...base, approver: { kind: "cli", argv: ["x"] } })[0]).toContain("approver");
+  });
+});
+
 describe("loadConfig", () => {
   it("reads a file, and an error lists the problems without quoting the file", () => {
     const dir = mkdtempSync(join(tmpdir(), "agw-config-"));

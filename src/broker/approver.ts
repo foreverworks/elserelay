@@ -7,6 +7,10 @@ import type { ApprovalRequest } from "./service.js";
  */
 export type Approver = {
   readonly ask: (request: ApprovalRequest) => Promise<void>;
+  /** Called on every poll with the ids that are held now, so an approver can drop what was answered elsewhere or timed out. */
+  readonly sync?: (heldIds: ReadonlySet<string>) => void;
+  /** Called when the broker closes; resolves once the approver has nothing running. */
+  readonly close?: () => Promise<void>;
 };
 
 /**

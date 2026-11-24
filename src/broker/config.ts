@@ -6,6 +6,19 @@ import type { Policy, Product } from "../core/types.js";
 
 const port = z.number().int().min(0).max(65_535);
 
+const approverConfig = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("cli") }),
+  z.strictObject({
+    kind: z.literal("command"),
+    /** The program and its arguments. Started directly, never through a shell. */
+    argv: z.array(z.string().min(1)).min(1),
+    /** Handed to the command as AGENT_GATEWAY_APPROVER_STATE_DIR, for what it keeps between runs. */
+    stateDir: z.string().min(1).optional(),
+    /** Names of variables of the broker's own environment that the command may see, besides PATH, HOME and LANG. */
+    passEnv: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
+  }),
+]);
+
 const config = z.strictObject({
   /** The SQLite file. */
   store: z.string().min(1),
@@ -24,8 +37,14 @@ const config = z.strictObject({
   deliveryTimeoutMs: z.number().int().min(1).default(60_000),
   /** How often the broker expires, retries, asks for approvals and pushes what waits. */
   pollMs: z.number().int().min(1).default(1000),
+  /** Who answers a held message besides the command line. Default: only the command line. */
+  approver: approverConfig.default({ kind: "cli" }),
   policy: z.unknown().default({}),
 });
+
+export type ApproverConfig =
+  | { readonly kind: "cli" }
+  | { readonly kind: "command"; readonly argv: readonly string[]; readonly stateDir?: string; readonly passEnv: readonly string[] };
 
 export type Config = {
   readonly store: string;
@@ -40,10 +59,18 @@ export type Config = {
   readonly products: ReadonlyMap<string, Product>;
   readonly deliveryTimeoutMs: number;
   readonly pollMs: number;
+  readonly approver: ApproverConfig;
   readonly policy: Policy;
 };
 
 export type Parsed = { readonly ok: true; readonly config: Config } | { readonly ok: false; readonly problems: readonly string[] };
+
+const commandOf = (a: Extract<z.output<typeof approverConfig>, { kind: "command" }>): ApproverConfig => ({
+  kind: "command",
+  argv: a.argv,
+  ...(a.stateDir === undefined ? {} : { stateDir: a.stateDir }),
+  passEnv: a.passEnv,
+});
 
 export function parseConfig(json: unknown): Parsed {
   const parsed = config.safeParse(json);
@@ -82,6 +109,7 @@ export function parseConfig(json: unknown): Parsed {
       products,
       deliveryTimeoutMs: parsed.data.deliveryTimeoutMs,
       pollMs: parsed.data.pollMs,
+      approver: parsed.data.approver.kind === "cli" ? { kind: "cli" } : commandOf(parsed.data.approver),
       policy: policy.policy,
     },
   };

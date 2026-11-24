@@ -5,12 +5,15 @@ import { openStore } from "../store/sqlite.js";
 import type { Store } from "../store/types.js";
 import { cliApprover } from "./approver.js";
 import type { Approver } from "./approver.js";
+import { makeCommandApprover } from "./command.js";
+import type { After, Spawn, Timing } from "./command.js";
 import { listen, makeChannel } from "./channel.js";
 import type { Every } from "./channel.js";
 import { loadConfig } from "./config.js";
 import type { Config } from "./config.js";
 import { makeService } from "./service.js";
 import type { Service } from "./service.js";
+import { nodeSpawn } from "./spawn.js";
 import { INSTRUCTIONS, POLICY, registerTools } from "./tools.js";
 
 /** What a running broker is made of, with every effect handed in. */
@@ -19,8 +22,13 @@ export type Effects = {
   readonly newId: () => string;
   readonly every: Every;
   readonly log: (line: string) => void;
-  /** Defaults to the command-line approver. */
+  /** Replaces the approver the config asks for. */
   readonly approver?: Approver;
+  /** The environment a command approver's program is built from. Defaults to the process's own. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly spawn?: Spawn;
+  readonly after?: After;
+  readonly commandTiming?: Timing;
 };
 
 export const realEffects: Effects = {
@@ -31,6 +39,11 @@ export const realEffects: Effects = {
     return () => clearInterval(timer);
   },
   log: (line) => process.stderr.write(`${line}\n`),
+};
+
+const realAfter: After = (ms, fn) => {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
 };
 
 export type Running = {
@@ -60,7 +73,6 @@ function mcpEnv(config: Config): NodeJS.ProcessEnv {
 
 export async function startBroker(config: Config, effects: Effects): Promise<Running> {
   const { log } = effects;
-  const approver = effects.approver ?? cliApprover(log);
   const store = openStore(config.store);
   const service = makeService({
     store,
@@ -70,6 +82,23 @@ export async function startBroker(config: Config, effects: Effects): Promise<Run
     newId: effects.newId,
     deliveryTimeoutMs: config.deliveryTimeoutMs,
   });
+
+  const approver =
+    effects.approver ??
+    (config.approver.kind === "command"
+      ? makeCommandApprover({
+          argv: config.approver.argv,
+          ...(config.approver.stateDir === undefined ? {} : { stateDir: config.approver.stateDir }),
+          passEnv: config.approver.passEnv,
+          env: effects.env ?? process.env,
+          service,
+          spawn: effects.spawn ?? nodeSpawn(),
+          after: effects.after ?? realAfter,
+          now: effects.now,
+          log,
+          ...(effects.commandTiming === undefined ? {} : { timing: effects.commandTiming }),
+        })
+      : cliApprover(log));
 
   const tokens = await loadTokens({ kind: "dir", dir: config.tokensDir });
   for (const label of tokens.keys()) {
@@ -93,7 +122,12 @@ export async function startBroker(config: Config, effects: Effects): Promise<Run
   const poll = (): void => {
     try {
       service.tick();
-      for (const request of service.approvals()) {
+      const held = service.approvals();
+      // A message that left the held state may come back (a rule that now asks), and then it is asked about again.
+      const heldIds = new Set(held.map((request) => request.id));
+      for (const id of [...asked]) if (!heldIds.has(id)) asked.delete(id);
+      approver.sync?.(heldIds);
+      for (const request of held) {
         if (asked.has(request.id)) continue;
         asked.add(request.id);
         approver.ask(request).catch((error: unknown) => log(`the approver failed for ${request.id}: ${error instanceof Error ? error.message : "unknown error"}`));
@@ -113,6 +147,7 @@ export async function startBroker(config: Config, effects: Effects): Promise<Run
     service,
     close: async () => {
       stopPolling();
+      await approver.close?.();
       await adapters.close();
       await mcp.close();
       store.close();
