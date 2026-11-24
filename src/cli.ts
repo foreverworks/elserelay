@@ -5,6 +5,7 @@
  * the broker's modules.
  */
 import { realpathSync } from "node:fs";
+import { hostname } from "node:os";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -46,6 +47,7 @@ export async function runCli(argv: readonly string[], env: Readonly<Record<strin
       readToken: (path) => readFile(path, "utf8"),
       state: nodeState,
       connect: mcpTools,
+      host: hostname(),
       now: io.now,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       out: io.out,

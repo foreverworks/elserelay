@@ -27,8 +27,9 @@ export const TITLE_CHARS = 200;
 
 const request = z.object({
   id: z.string().min(1),
-  from: z.object({ container: z.string(), product: z.string() }),
-  to: z.object({ container: z.string(), product: z.string() }),
+  thread: z.string().min(1),
+  from: z.object({ container: z.string(), product: z.string(), session: z.string() }),
+  to: z.object({ container: z.string(), product: z.string(), session: z.string() }),
   body: z.string(),
   decideBy: z.number(),
 });
@@ -65,6 +66,8 @@ export type Effects = {
   readonly readToken: (path: string) => Promise<string>;
   readonly state: (dir: string) => StateIo;
   readonly connect: (url: string, token: string) => Tools;
+  /** The name of the machine the request comes from. */
+  readonly host: string;
   readonly now: () => number;
   readonly sleep: (ms: number) => Promise<void>;
   readonly out: (line: string) => void;
@@ -74,11 +77,30 @@ export type Effects = {
 const oneLine = (text: string): string => escapeForTerminal(text).replace(/\n/g, " ");
 
 /** The title the person reads: who asks to send to whom, cleaned to one line of at most 200 characters. */
-export function titleOf(r: Pick<Request, "from" | "to">): string {
+export function titleOf(r: { readonly from: Pick<Request["from"], "container" | "product">; readonly to: Pick<Request["to"], "container" | "product"> }): string {
   const title = oneLine(`Let this message go? ${r.from.container} (${r.from.product}) to ${r.to.container} (${r.to.product})`);
   const chars = Array.from(title);
   return chars.length <= TITLE_CHARS ? title : `${chars.slice(0, TITLE_CHARS - 1).join("")}…`;
 }
+
+/**
+ * The body as the person reads it. A draft is shown formatted, and formatting can hide text (a link's target, a comment,
+ * white-on-white markup), so the body goes inside a code fence longer than any run of backticks in it.
+ */
+export function draftOf(body: string): string {
+  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return `${fence}\n${escapeForTerminal(body)}\n${fence}`;
+}
+
+/** Who is asking, which Elsewire requires: the gateway itself, for one thread. A gateway has no page to link to. */
+export const requesterOf = (r: Request, host: string): Record<string, unknown> => ({
+  client: "agent-gateway",
+  session: r.thread,
+  title: titleOf(r),
+  host,
+  extra: { session_url_unavailable: "a gateway message has no web page", message: r.id, from_session: oneLine(r.from.session), to_session: oneLine(r.to.session) },
+});
 
 export const timeoutSeconds = (decideBy: number, now: number): number =>
   Math.min(MAX_TIMEOUT_SECONDS, Math.max(MIN_TIMEOUT_SECONDS, Math.ceil((decideBy - now) / 1000)));
@@ -87,18 +109,22 @@ const stateName = (id: string): string => createHash("sha256").update(id, "utf8"
 
 const isLoopback = (host: string): boolean => host === "localhost" || host === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(host);
 
-/** A bearer token goes over TLS, or to this machine. */
-export function urlProblem(url: string): string | null {
+/**
+ * A bearer token goes over TLS, or to this machine. `allowHttp` is for a network that encrypts on its own (a WireGuard
+ * mesh, say); it is a setting because only the operator knows that.
+ */
+export function urlProblem(url: string, allowHttp = false): string | null {
   const parsed = new URL(url);
   if (parsed.protocol === "https:") return null;
-  return parsed.protocol === "http:" && isLoopback(parsed.hostname) ? null : "ELSEWIRE_URL must be https (http is accepted only for a loopback address)";
+  if (parsed.protocol === "http:" && (allowHttp || isLoopback(parsed.hostname))) return null;
+  return "ELSEWIRE_URL must be https (http is accepted only for a loopback address, or with ELSEWIRE_ALLOW_HTTP=1 on a network that encrypts on its own)";
 }
 
 type Verdict = "approve" | "refuse" | "none";
 
 async function decide(r: Request, tools: Tools, state: StateIo, effects: Effects): Promise<Verdict> {
   const { err, now, sleep } = effects;
-  const draft = escapeForTerminal(r.body);
+  const draft = draftOf(r.body);
   if (draft.length > MAX_DRAFT_CHARS) {
     err(`message ${r.id} is longer than ${MAX_DRAFT_CHARS} characters, more than a person can be asked to read in one go: refused without asking`);
     return "refuse";
@@ -110,7 +136,7 @@ async function decide(r: Request, tools: Tools, state: StateIo, effects: Effects
     const made = created.parse(
       await tools.call(
         "elsewire_request",
-        { connector: "review", title: titleOf(r), draft, timeout_sec: timeoutSeconds(r.decideBy, now()), replies: ["Refuse"] },
+        { connector: "review", title: titleOf(r), draft, timeout_sec: timeoutSeconds(r.decideBy, now()), replies: ["Refuse"], requester: requesterOf(r, effects.host) },
         30_000,
       ),
     );
@@ -168,7 +194,7 @@ export async function runElsewireApprover(effects: Effects): Promise<number> {
     err(`settings: ${config.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")} (ELSEWIRE_URL, ELSEWIRE_TOKEN_FILE and ELSEWIRE_STATE_DIR are needed)`);
     return 1;
   }
-  const problem = urlProblem(config.data.ELSEWIRE_URL);
+  const problem = urlProblem(config.data.ELSEWIRE_URL, env["ELSEWIRE_ALLOW_HTTP"] === "1");
   if (problem !== null) {
     err(problem);
     return 1;

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { MAX_DRAFT_CHARS, mcpTools, nodeState, resultJson, runElsewireApprover, timeoutSeconds, titleOf, urlProblem } from "../src/approver/elsewire.js";
+import { MAX_DRAFT_CHARS, draftOf, mcpTools, nodeState, resultJson, runElsewireApprover, timeoutSeconds, titleOf, urlProblem } from "../src/approver/elsewire.js";
 import type { Effects } from "../src/approver/elsewire.js";
 import { escapeForTerminal } from "../src/broker/approver.js";
 import { runCli } from "../src/cli.js";
@@ -52,6 +52,7 @@ async function run(input: unknown, changes: { env?: Record<string, string | unde
     readToken: async (path) => readFileSync(path, "utf8"),
     state: nodeState,
     connect: mcpTools,
+    host: "box-1",
     now: () => NOW,
     sleep: async (ms) => void sleeps.push(ms),
     out: (l) => out.push(l),
@@ -67,7 +68,7 @@ const done = (text: string, edited = false): Record<string, unknown> => ({ statu
 describe("asking a person through Elsewire", () => {
   it("approves when the person returns the text unchanged, and asks as the brief says", async () => {
     const body = "run \u001b[2Jthis\nline two\r";
-    const draft = escapeForTerminal(body);
+    const draft = draftOf(body);
     let stateDuringWait: { exists: boolean; content: string; mode: number } | undefined;
     fake.onAwait = () => {
       stateDuringWait = { exists: existsSync(stateFile("msg-1")), content: readFileSync(stateFile("msg-1"), "utf8"), mode: statSync(stateFile("msg-1")).mode & 0o777 };
@@ -82,6 +83,14 @@ describe("asking a person through Elsewire", () => {
         draft,
         timeout_sec: 120,
         replies: ["Refuse"],
+        // Elsewire refuses a request that does not say who asks and how to reach it.
+        requester: {
+          client: "agent-gateway",
+          session: "msg-1",
+          title: "Let this message go? alpha (claude) to beta (codex)",
+          host: "box-1",
+          extra: { session_url_unavailable: "a gateway message has no web page", message: "msg-1", from_session: "a1", to_session: "b1" },
+        },
       },
     ]);
     expect(fake.requests[0]).not.toHaveProperty("notes");
@@ -94,7 +103,7 @@ describe("asking a person through Elsewire", () => {
   });
 
   it("keeps waiting while the answer is pending, and does not spin when the server answers at once", async () => {
-    fake.script.push({ status: "pending" }, { status: "pending" }, done("please run the tests"));
+    fake.script.push({ status: "pending" }, { status: "pending" }, done(draftOf("please run the tests")));
     const r = await run(approval());
     expect(r.code).toBe(0);
     expect(fake.awaits).toHaveLength(3);
@@ -108,7 +117,7 @@ describe("asking a person through Elsewire", () => {
     expect(first).toMatchObject({ code: 1, out: [] });
     expect(readFileSync(stateFile("msg-1"), "utf8")).toBe("req-1");
 
-    fake.script.push(done("please run the tests"));
+    fake.script.push(done(draftOf("please run the tests")));
     const second = await run(approval());
     expect(second).toMatchObject({ code: 0, out: ['{"answer":"approve"}'] });
     expect(fake.requests).toHaveLength(1);
@@ -152,7 +161,7 @@ describe("asking a person through Elsewire", () => {
     fake.script.push({ status: "failed" });
     expect(await run(approval())).toMatchObject({ code: 1, out: [] });
     expect(existsSync(stateFile("msg-1"))).toBe(false);
-    fake.script.push(done("please run the tests"));
+    fake.script.push(done(draftOf("please run the tests")));
     expect(await run(approval())).toMatchObject({ code: 0, out: ['{"answer":"approve"}'] });
     expect(fake.requests).toHaveLength(2);
   });
@@ -169,9 +178,10 @@ describe("asking a person through Elsewire", () => {
     const r = await run(approval({ body: "\u001b".repeat(700) }));
     expect(r.out).toEqual(['{"answer":"refuse"}']);
     expect(fake.requests).toEqual([]);
-    // Exactly 4000 characters is still asked.
-    fake.script.push(done("x".repeat(MAX_DRAFT_CHARS)));
-    expect((await run(approval({ id: "edge", body: "x".repeat(MAX_DRAFT_CHARS) }))).out).toEqual(['{"answer":"approve"}']);
+    // Exactly 4000 characters, the fence included, is still asked.
+    const edge = "x".repeat(MAX_DRAFT_CHARS - draftOf("").length);
+    fake.script.push(done(draftOf(edge)));
+    expect((await run(approval({ id: "edge", body: edge }))).out).toEqual(['{"answer":"approve"}']);
   });
 
   it("refuses, without asking, a message whose deadline has passed", async () => {
@@ -219,7 +229,7 @@ describe("asking a person through Elsewire", () => {
   });
 
   it("is run by `agent-gateway approver elsewire`, with the request on stdin and the answer on stdout", async () => {
-    fake.script.push(done("please run the tests"));
+    fake.script.push(done(draftOf("please run the tests")));
     const out: string[] = [];
     const code = await runCli(
       ["approver", "elsewire"],
@@ -231,6 +241,12 @@ describe("asking a person through Elsewire", () => {
 });
 
 describe("pieces", () => {
+  it("shows the body inside a fence the body cannot close, so no formatting hides any of it", () => {
+    expect(draftOf("plain")).toBe("```\nplain\n```");
+    expect(draftOf("a\n```\n[link](http://x)\n<!-- hidden -->")).toBe("````\na\n```\n[link](http://x)\n<!-- hidden -->\n````");
+    expect(draftOf("`````")).toBe("``````\n`````\n``````");
+  });
+
   it("cleans the title to one line of at most 200 characters", () => {
     const from = { container: "a\u001b[31m\nb", product: "claude" };
     const to = { container: "x".repeat(400), product: "codex" };
@@ -254,6 +270,8 @@ describe("pieces", () => {
     expect(urlProblem("http://localhost/mcp")).toBeNull();
     expect(urlProblem("http://[::1]:9/mcp")).toBeNull();
     expect(urlProblem("http://elsewire.example.com/mcp")).toContain("https");
+    expect(urlProblem("http://elsewire.example.com/mcp", true)).toBeNull();
+    expect(urlProblem("ftp://elsewire.example.com/mcp", true)).toContain("https");
   });
 
   it("reads a tool result from its structured content or from the JSON in its text, and fails on an error", () => {

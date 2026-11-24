@@ -54,6 +54,7 @@ export async function fakeElsewire(): Promise<FakeElsewire> {
           draft: z.string().optional(),
           timeout_sec: z.number().optional(),
           replies: z.array(z.string()).optional(),
+          requester: z.record(z.string(), z.unknown()),
           notes: z.string().optional(),
         },
       },

@@ -212,12 +212,17 @@ example above. Its settings are environment variables:
 | Variable | Meaning |
 |---|---|
 | `ELSEWIRE_URL` | The server's MCP address. It must be `https`; plain `http` is accepted only for a loopback address, so a token never crosses a network in the clear. |
+| `ELSEWIRE_ALLOW_HTTP` | Set to `1` to accept plain `http` to any address. Only for a network that encrypts on its own, such as a WireGuard mesh. |
 | `ELSEWIRE_TOKEN_FILE` | A file holding the bearer token. |
 | `ELSEWIRE_STATE_DIR` | Where it keeps the id of the request it opened for each message. Falls back to the `stateDir` of the config. |
 
-List the first two in `passEnv` and set them on the broker's container. A
+List the ones you set in `passEnv` and set them on the broker's container. A
 command must be idempotent by message id, because after a broker restart the
 program runs again for every message that is still held; the Elsewire command is.
+
+The message is shown inside a code fence, so no formatting in it can hide a part of
+it from the person who decides, and the request says it comes from `agent-gateway`,
+with the message's thread as its session.
 
 ## Backing up the SQLite file
 
