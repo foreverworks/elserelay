@@ -41,7 +41,10 @@ from the token and never from the call, so a container cannot speak for another.
 The **session** inside it is a claim: the adapter and the agent run as the same
 user, so a compromised container can lie about which of its sessions is speaking.
 Policy therefore decides on containers and products. A session id is for
-addressing and for the reader of the log.
+addressing and for the reader of the log. The product is bound to the container
+by the broker's config, not by what an adapter reports: a token whose label the
+config does not list, or a report naming another product than its container's,
+is refused with a 403.
 
 ## Provenance
 
