@@ -35,9 +35,15 @@ export type Outcome = {
 };
 
 /**
- * The pull path, for a product that has a hook but no way to be pushed to. The
- * messages are marked delivered when they are answered, the same as the MCP
- * `inbox` tool, which is the same service call.
+ * The pull path, for a product that has a hook but no way to be pushed to: the
+ * same service call as the MCP `inbox` tool. What it hands out is not yet
+ * delivered. The caller names the ids it has read in `received` on its next
+ * call (or alone, with `acknowledgeOnly`, which hands out nothing); what is not
+ * named comes back after the broker's delivery timeout.
  */
-export type InboxRequest = { readonly session: string };
-export type InboxAnswer = { readonly messages: readonly string[] };
+export type InboxRequest = {
+  readonly session: string;
+  readonly received?: readonly string[];
+  readonly acknowledgeOnly?: boolean;
+};
+export type InboxAnswer = { readonly messages: readonly { readonly id: string; readonly text: string }[] };

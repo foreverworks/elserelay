@@ -8,7 +8,7 @@ import { events, tracked } from "./fixtures.js";
 const MOVES: Record<State, Partial<Record<Event["kind"], State>>> = {
   received: { refuse: "refused", hold: "held", queue: "queued" },
   held: { approve: "queued", refuse: "refused", expire: "expired" },
-  queued: { hold: "held", "hand-out": "delivering", refuse: "refused", expire: "expired" },
+  queued: { hold: "held", "hand-out": "delivering", pull: "delivering", refuse: "refused", expire: "expired" },
   delivering: { deliver: "delivered", retry: "queued", refuse: "refused", expire: "expired" },
   delivered: {},
   refused: {},
@@ -29,7 +29,8 @@ describe("step", () => {
           if (result.ok) {
             expect(result.next.state).toBe(to);
             expect(result.next.updatedAt).toBe(5000);
-            expect(result.next.message).toEqual(tracked(state).message);
+            // A refused message keeps no text; its length and hash stay.
+            expect(result.next.message).toEqual(kind === "refuse" ? { ...tracked(state).message, body: "" } : tracked(state).message);
           }
         }
       });
@@ -52,6 +53,27 @@ describe("step", () => {
 
     const refused = step(tracked("held"), events.refuse, 6000);
     expect(refused.ok && refused.next.reason).toEqual({ kind: "stopped" });
+  });
+
+  it("a pull does not count as an attempt, marks the message pulled, and can be repeated while it is unacknowledged", () => {
+    const pulled = step(tracked("queued", { attempts: 2 }), events.pull, 2000);
+    expect(pulled.ok && pulled.next).toMatchObject({ state: "delivering", attempts: 2, pulled: true, updatedAt: 2000 });
+    const again = step(tracked("delivering", { attempts: 2, pulled: true }), events.pull, 9000);
+    expect(again.ok && again.next).toMatchObject({ state: "delivering", attempts: 2, pulled: true, updatedAt: 9000 });
+    // A message the push path has out is not pulled from under it.
+    expect(step(tracked("delivering", { attempts: 1, pulled: false }), events.pull, 1).ok).toBe(false);
+  });
+
+  it("a hand-out or a retry clears the pulled mark", () => {
+    const out = step(tracked("queued", { pulled: true }), events["hand-out"], 1);
+    expect(out.ok && out.next.pulled).toBe(false);
+    const back = step(tracked("delivering", { attempts: 1, pulled: true }), events.retry, 1);
+    expect(back.ok && back.next.pulled).toBe(false);
+  });
+
+  it("keeps the length and hash of a body it refuses", () => {
+    const refused = step(tracked("queued"), events.refuse, 1);
+    expect(refused.ok && refused.next.message).toMatchObject({ body: "", bodyChars: 5, bodySha256: tracked("queued").message.bodySha256 });
   });
 
   it("rejects a hand-out whose attempt number does not follow the count", () => {

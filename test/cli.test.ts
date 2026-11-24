@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import { openStore } from "../src/store/sqlite.js";
+import { message } from "./fixtures.js";
 
 let dir: string;
 let configPath: string;
@@ -69,6 +70,28 @@ describe("agent-gateway", () => {
     expect(await runCli(["approve", "nope", "--config", configPath], {}, run.io)).toBe(1);
     expect(run.err).toContain("no message nope");
     expect(await runCli(["audit", "--since", "yesterday-ish", "--config", configPath], {}, run.io)).toBe(2);
+  });
+
+  it("prints the line that says a container's refusals went unrecorded, among the other control lines", async () => {
+    const store = openStore(join(dir, "broker.sqlite"));
+    store.noteRefusalLimit("alpha\u001b[2J", Date.parse("2026-11-24T09:00:00Z"), 60, 3_600_000);
+    store.close();
+    const run = io();
+    expect(await runCli(["audit", "--config", configPath], {}, run.io)).toBe(0);
+    expect(run.out).toEqual(["2026-11-24T09:00:00.000Z refusals of alpha\\u{1b}[2J are not recorded: more than 60 refused within 60 minutes"]);
+  });
+
+  it("says that an approval came too late, and that the message was refused as unanswered", async () => {
+    const store = openStore(join(dir, "broker.sqlite"));
+    store.receive(message("late"), 1000);
+    store.apply("late", { kind: "hold" }, 1000);
+    store.close();
+    const run = io();
+    expect(await runCli(["approve", "late", "--config", configPath], {}, run.io)).toBe(1);
+    expect(run.err).toEqual(["message late was waiting past its deadline, so it was refused as unanswered"]);
+    const check = openStore(join(dir, "broker.sqlite"));
+    expect(check.get("late")).toMatchObject({ state: "refused", reason: { kind: "approver", answer: "timeout" } });
+    check.close();
   });
 
   it("reports a broken config file instead of running", async () => {

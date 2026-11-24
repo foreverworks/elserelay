@@ -5,9 +5,10 @@
  * `caller` is always a container label that the transport has already matched
  * to a token. A label that is not in `products` gets `forbidden`.
  */
-import { limitReason } from "../core/limits.js";
+import { bodyFacts } from "../core/body.js";
+import { limitReason, refusalsReason } from "../core/limits.js";
 import { decide } from "../core/policy.js";
-import { render } from "../core/render.js";
+import { oneLine, render } from "../core/render.js";
 import type { Address, Certainty, Message, Peer, Policy, Product, Reason, Sender, Tracked } from "../core/types.js";
 import type { Capabilities, Delivered } from "../drivers/driver.js";
 import type { Store } from "../store/types.js";
@@ -27,6 +28,11 @@ export type Deps = {
 };
 
 export const OFFLINE_AFTER_MS = 90_000;
+
+/** A `send` continues the hop count of what its session was handed by the target container within this time. */
+export const HOP_MEMORY_MS = 3_600_000;
+
+const RETURNED_LINE = "This message was given to you before and has not been confirmed as read. Pass its id in `received` on your next inbox call so it is not returned again.";
 
 /** Who the caller says it is. The session is a claim; the container is not. */
 export type Claim = { readonly session: string; readonly title: string | null };
@@ -72,7 +78,7 @@ export type ApprovalRequest = {
   readonly decideBy: number;
 };
 
-export type Answered = { readonly ok: true } | { readonly ok: false; readonly why: "not-found" | "not-held" };
+export type Answered = { readonly ok: true } | { readonly ok: false; readonly why: "not-found" | "not-held" | "timed-out" };
 
 export type Service = {
   readonly productOf: (container: string) => Product | undefined;
@@ -82,7 +88,13 @@ export type Service = {
   /** The adapter's stream for this container is open, or has just closed. Only the transport knows. */
   readonly streamOpened: (container: string) => void;
   readonly streamClosed: (container: string) => void;
-  readonly inbox: (caller: string, session: string) => { readonly kind: "ok"; readonly messages: readonly Pulled[] } | Forbidden;
+  /**
+   * Marks the messages in `received` as delivered, then hands out what waits. A message is delivered when its addressee
+   * says so here or answers it; one it did not confirm comes back after `deliveryTimeoutMs`.
+   */
+  readonly inbox: (caller: string, session: string, received?: readonly string[]) => { readonly kind: "ok"; readonly messages: readonly Pulled[] } | Forbidden;
+  /** Only the first half of `inbox`: nothing is handed out. */
+  readonly acknowledge: (caller: string, session: string, received: readonly string[]) => { readonly kind: "ok" } | Forbidden;
   readonly report: (caller: string, report: AdapterReport) => { readonly kind: "ok" } | { readonly kind: "wrong-product" } | Forbidden;
   readonly nextFor: (container: string) => readonly HandOut[];
   readonly outcome: (caller: string, outcome: Outcome) => { readonly applied: boolean };
@@ -112,7 +124,25 @@ export function makeService(deps: Deps): Service {
 
   const listed = (to: Address): boolean => store.peers().some((p) => p.container === to.container && p.product === to.product && p.session === to.session);
 
-  const sender = (container: string, product: Product, claim: Claim): Sender => ({ container, product, session: claim.session, title: claim.title });
+  const sender = (container: string, product: Product, claim: Claim): Sender => ({
+    container,
+    product,
+    session: oneLine(claim.session),
+    title: claim.title === null ? null : oneLine(claim.title) || null,
+  });
+
+  /** The hop a `send` starts at: one more than the newest message its session was handed by the target, if any came recently. */
+  const hopForSend = (from: Sender, targetContainer: string, at: number): number => {
+    const last = store.lastReceived({ container: from.container, product: from.product, session: from.session }, targetContainer, at - HOP_MEMORY_MS);
+    return last === null ? 0 : last.message.hop + 1;
+  };
+
+  type Verdict =
+    | { readonly kind: "go"; readonly state: "queued" | "held" }
+    /** `stored` is what the operator reads in the audit; `shown` is what the sender is told. */
+    | { readonly kind: "refuse"; readonly stored: Reason; readonly shown: Reason };
+
+  const refusal = (stored: Reason, shown: Reason = stored): Verdict => ({ kind: "refuse", stored, shown });
 
   function submit(
     from: Sender,
@@ -125,40 +155,54 @@ export function makeService(deps: Deps): Service {
     const targetProduct = products.get(target.container);
     // A container that is not configured has no product; the sender's stands in so the refusal can still be recorded.
     const to: Address = { container: target.container, product: targetProduct ?? from.product, session: target.session };
+    const facts = bodyFacts(body);
+    const thread = link.thread ?? id;
+    // Counted before this message is stored, so it does not count itself.
+    const sentInWindow = store.sentSince(from.container, target.container, at - limits.rate.windowMs);
+
+    const decision = targetProduct === undefined ? null : decide(policy, from, to);
+    const verdict = ((): Verdict => {
+      // An unknown container is answered as a policy refusal that names no rule, so a sender cannot tell it from one it may not reach.
+      if (decision === null) return refusal({ kind: "unknown-peer" }, { kind: "policy", rule: null });
+      // Policy goes before the peer check, so a sender cannot learn which sessions exist in a container it may not reach.
+      if (decision.decision === "deny") return refusal({ kind: "policy", rule: decision.rule });
+      if (store.stopped()) return refusal({ kind: "stopped" });
+      if (!listed(to)) return refusal({ kind: "unknown-peer" });
+      const over = limitReason(limits, { hop: link.hop, bodyChars: facts.chars, sentInWindow });
+      if (over !== null) return refusal(over);
+      return { kind: "go", state: decision.decision === "ask" ? "held" : "queued" };
+    })();
+
+    if (verdict.kind === "refuse") {
+      // Past the budget of refusals nothing is stored, so a container that only sends refusable messages cannot grow the file.
+      const over = refusalsReason(limits, store.refusedSince(from.container, at - limits.refusals.windowMs));
+      if (over !== null) {
+        store.noteRefusalLimit(from.container, at, limits.refusals.messages, limits.refusals.windowMs);
+        return { kind: "refused", id, thread, reason: over };
+      }
+    }
+
+    // A refused message is stored without its text: only the length and the hash stay.
     const message: Message = {
       id,
-      thread: link.thread ?? id,
+      thread,
       hop: link.hop,
       replyTo: link.replyTo,
       from,
       to,
-      body,
+      body: verdict.kind === "go" ? body : "",
+      bodyChars: facts.chars,
+      bodySha256: facts.sha256,
       createdAt: at,
       expiresAt: at + limits.messageTtlMs,
     };
-    // Counted before this message is stored, so it does not count itself.
-    const sentInWindow = store.sentSince(from.container, target.container, at - limits.rate.windowMs);
     store.receive(message, at);
-    const refuse = (reason: Reason): Submitted => {
-      store.apply(id, { kind: "refuse", reason }, at);
-      return { kind: "refused", id, thread: message.thread, reason };
-    };
-
-    if (targetProduct === undefined) return refuse({ kind: "unknown-peer" });
-    const decision = decide(policy, from, to);
-    // Policy goes before the peer check, so a sender cannot learn which sessions exist in a container it may not reach.
-    if (decision.decision === "deny") return refuse({ kind: "policy", rule: decision.rule });
-    if (store.stopped()) return refuse({ kind: "stopped" });
-    if (!listed(to)) return refuse({ kind: "unknown-peer" });
-    const over = limitReason(limits, { hop: link.hop, bodyChars: Array.from(body).length, sentInWindow });
-    if (over !== null) return refuse(over);
-
-    if (decision.decision === "ask") {
-      store.apply(id, { kind: "hold" }, at);
-      return { kind: "accepted", id, thread: message.thread, state: "held", to };
+    if (verdict.kind === "refuse") {
+      store.apply(id, { kind: "refuse", reason: verdict.stored }, at);
+      return { kind: "refused", id, thread, reason: verdict.shown };
     }
-    store.apply(id, { kind: "queue" }, at);
-    return { kind: "accepted", id, thread: message.thread, state: "queued", to };
+    store.apply(id, { kind: verdict.state === "held" ? "hold" : "queue" }, at);
+    return { kind: "accepted", id, thread, state: verdict.state, to };
   }
 
   type Screened = { readonly go: false } | { readonly go: true; readonly wake: boolean };
@@ -172,32 +216,52 @@ export function makeService(deps: Deps): Service {
       return { go: false };
     }
     // A rule that let the message in may say `ask` by now. A person who already said yes to this message is not asked again.
-    if (decision.decision === "ask" && !store.wasApproved(t.message.id)) {
+    // Only a message that has not left yet can be held again: one already handed out went under an earlier rule.
+    if (decision.decision === "ask" && t.state === "queued" && !store.wasApproved(t.message.id)) {
       store.apply(t.message.id, { kind: "hold" }, at);
       return { go: false };
     }
     return { go: true, wake: decision.wake };
   }
 
-  const hasDelivering = (to: Address): boolean => store.inbox(to, false).some((t) => t.state === "delivering");
+  // A message a session pulled does not block the push path: it ends by its own acknowledgement or by expiry.
+  const hasDelivering = (to: Address): boolean => store.inbox(to, false).some((t) => t.state === "delivering" && !t.pulled);
 
-  function refuseOrRetry(t: Tracked, detail: string, at: number): void {
-    const reason: Reason = { kind: "driver", detail };
-    if (t.attempts >= limits.maxAttempts) store.apply(t.message.id, { kind: "refuse", reason }, at);
-    else store.apply(t.message.id, { kind: "retry", reason }, at);
+  /** Writes only if the message is still as `t` showed it: the push path and the clock must not undo a newer answer. */
+  function refuseOrRetry(t: Tracked, reason: Reason, at: number): void {
+    store.applyIf(t.message.id, { kind: t.attempts >= limits.maxAttempts ? "refuse" : "retry", reason }, at, t);
   }
+
+  const timedOut = (t: Tracked, at: number): boolean => t.updatedAt + limits.approvalTtlMs <= at;
+  const TIMEOUT: Reason = { kind: "approver", answer: "timeout" };
 
   function answer(id: string, event: { readonly kind: "approve" } | { readonly kind: "refuse"; readonly reason: Reason }): Answered {
     const current = store.get(id);
     if (current === null) return { ok: false, why: "not-found" };
     if (current.state !== "held") return { ok: false, why: "not-held" };
+    const at = now();
+    // A yes that arrives at or after the deadline is a timeout: the sender was already allowed to count on a refusal.
+    const late = event.kind === "approve" && timedOut(current, at);
     try {
-      store.apply(id, event, now());
+      if (store.applyIf(id, late ? { kind: "refuse", reason: TIMEOUT } : event, at, current) === null) return { ok: false, why: "not-held" };
     } catch {
       // Another process (the command line) answered between the read and the write.
       return { ok: false, why: "not-held" };
     }
-    return { ok: true };
+    return late ? { ok: false, why: "timed-out" } : { ok: true };
+  }
+
+  const isAddressee = (t: Tracked, to: Address): boolean => t.message.to.container === to.container && t.message.to.product === to.product && t.message.to.session === to.session;
+
+  /** The addressee's own word that it has these: they become delivered, with certainty confirmed. */
+  function acknowledge(to: Address, ids: readonly string[], at: number): void {
+    const done: string[] = [];
+    for (const id of ids) {
+      const t = store.get(id);
+      if (t === null || t.state !== "delivering" || !isAddressee(t, to)) continue;
+      if (store.applyIf(id, { kind: "deliver", certainty: "confirmed" }, at, t) !== null) done.push(id);
+    }
+    store.markRead(to, done, at);
   }
 
   return {
@@ -219,7 +283,8 @@ export function makeService(deps: Deps): Service {
     send: (caller, claim, to, body) => {
       const product = products.get(caller);
       if (product === undefined) return { kind: "forbidden" };
-      return submit(sender(caller, product, claim), to, body, { thread: null, hop: 0, replyTo: null });
+      const from = sender(caller, product, claim);
+      return submit(from, to, body, { thread: null, hop: hopForSend(from, to.container, now()), replyTo: null });
     },
 
     reply: (caller, claim, messageId, body) => {
@@ -231,26 +296,37 @@ export function makeService(deps: Deps): Service {
       if (original === null || !shown) return { kind: "not-found" };
       const { message } = original;
       if (message.to.container !== caller || message.to.session !== claim.session) return { kind: "not-found" };
+      // An answer proves the message was read, whatever became of its outcome.
+      if (original.state === "delivering") acknowledge(message.to, [messageId], now());
       return submit(sender(caller, product, claim), message.from, body, { thread: message.thread, hop: message.hop + 1, replyTo: message.id });
     },
 
-    inbox: (caller, session) => {
+    inbox: (caller, session, received = []) => {
       const product = products.get(caller);
       if (product === undefined) return { kind: "forbidden" };
       // The address is built from the caller's own container, so no argument can name another container's session.
       const to: Address = { container: caller, product, session };
-      if (store.stopped()) return { kind: "ok", messages: [] };
       const at = now();
+      acknowledge(to, received, at);
+      if (store.stopped()) return { kind: "ok", messages: [] };
       const pulled: Pulled[] = [];
       for (const t of store.inbox(to, true)) {
-        if (t.state !== "queued") continue;
+        // Not a message whose push ended with no outcome: the adapter may have handed it over, and only the push path retries it with its id.
+        const fresh = t.state === "queued" && t.reason?.kind !== "no-outcome";
+        const again = t.state === "delivering" && t.pulled && t.updatedAt + deps.deliveryTimeoutMs <= at;
+        if (!fresh && !again) continue;
         if (!screen(t, at).go) continue;
-        store.apply(t.message.id, { kind: "hand-out", attempt: t.attempts + 1 }, at);
-        store.apply(t.message.id, { kind: "deliver", certainty: "confirmed" }, at);
-        pulled.push({ id: t.message.id, text: render(t.message) });
+        if (store.applyIf(t.message.id, { kind: "pull" }, at, t) === null) continue;
+        pulled.push({ id: t.message.id, text: again ? `${RETURNED_LINE}\n\n${render(t.message)}` : render(t.message) });
       }
-      store.markRead(to, pulled.map((p) => p.id), at);
       return { kind: "ok", messages: pulled };
+    },
+
+    acknowledge: (caller, session, received) => {
+      const product = products.get(caller);
+      if (product === undefined) return { kind: "forbidden" };
+      acknowledge({ container: caller, product, session }, received, now());
+      return { kind: "ok" };
     },
 
     streamOpened: (container) => {
@@ -265,11 +341,16 @@ export function makeService(deps: Deps): Service {
       if (product === undefined) return { kind: "forbidden" };
       if (report.product !== product) return { kind: "wrong-product" };
       const at = now();
-      const bySession = new Map(report.sessions.map((s) => [s.session, s]));
+      // What an adapter reports ends up in list_peers, the approver's view and the audit, so it is cleaned here. A session id that
+      // cleaning changes would name a different session than the product knows, so it is left out.
+      const clean = report.sessions.filter((s) => oneLine(s.session) === s.session && s.session !== "");
+      const bySession = new Map(clean.map((s) => [s.session, s]));
       store.reportPeers(
         caller,
         product,
-        [...bySession.values()].map((s): Peer => ({ container: caller, product, session: s.session, title: s.title, activity: s.activity, seenAt: at })),
+        [...bySession.values()].map(
+          (s): Peer => ({ container: caller, product, session: s.session, title: s.title === null ? null : oneLine(s.title) || null, activity: s.activity, seenAt: at }),
+        ),
       );
       capabilities.set(caller, report.capabilities);
       return { kind: "ok" };
@@ -316,7 +397,7 @@ export function makeService(deps: Deps): Service {
         const certainty: Certainty = result.certainty;
         store.apply(t.message.id, { kind: "deliver", certainty }, at);
       } else if (result.retry) {
-        refuseOrRetry(t, result.detail, at);
+        refuseOrRetry(t, { kind: "driver", detail: result.detail }, at);
       } else {
         store.apply(t.message.id, { kind: "refuse", reason: { kind: "driver", detail: result.detail } }, at);
       }
@@ -341,12 +422,10 @@ export function makeService(deps: Deps): Service {
 
     tick: () => {
       const at = now();
-      for (const t of store.expired(at)) store.apply(t.message.id, { kind: "expire" }, at);
-      for (const t of store.overdue(at - deps.deliveryTimeoutMs)) {
-        refuseOrRetry(t, `no outcome within ${deps.deliveryTimeoutMs} ms`, at);
-      }
+      for (const t of store.expired(at)) store.applyIf(t.message.id, { kind: "expire" }, at, t);
+      for (const t of store.overdue(at - deps.deliveryTimeoutMs)) refuseOrRetry(t, { kind: "no-outcome", ms: deps.deliveryTimeoutMs }, at);
       for (const t of store.held()) {
-        if (t.updatedAt + limits.approvalTtlMs <= at) store.apply(t.message.id, { kind: "refuse", reason: { kind: "approver", answer: "timeout" } }, at);
+        if (timedOut(t, at)) store.applyIf(t.message.id, { kind: "refuse", reason: TIMEOUT }, at, t);
       }
     },
   };

@@ -76,12 +76,40 @@ describe("two adapters through one broker", () => {
     expect(JSON.stringify(peers.json)).not.toContain('"container":"beta"');
     const sent = await call(r.alpha, "send", { ...SEND, body: "hello" });
     expect(sent.isError).toBe(true);
-    expect(JSON.stringify(sent.json)).toContain("no-alpha-to-beta");
+    // The sender is told a policy refused it, not which rule: the rule is the operator's to read, in the audit.
+    expect(JSON.stringify(sent.json)).toContain("no policy rule lets you message that session");
+    expect(JSON.stringify(sent.json)).not.toContain("no-alpha-to-beta");
     const [stored] = r.h.running.store.audit(0);
     expect(stored?.event).toBe("receive");
     expect(r.h.running.store.audit(0).map((e) => e.event)).toEqual(["receive", "refuse"]);
     expect(r.h.running.store.audit(0)[1]?.detail).toEqual({ kind: "policy", rule: "no-alpha-to-beta" });
     expect(r.b.deliveries).toEqual([]);
+  });
+
+  it("answers an unknown container and a policy refusal with the same words", async () => {
+    const r = await rig({ rules: [{ name: "closed-door", from: {}, to: { container: "beta" }, decision: "deny" }, { name: "rest", from: {}, to: {}, decision: "allow" }] });
+    const denied = await call(r.alpha, "send", { ...SEND, body: "x" });
+    const unknown = await call(r.alpha, "send", { ...SEND, to_container: "nowhere", body: "x" });
+    expect(denied.isError).toBe(true);
+    const words = (res: typeof denied): string => JSON.stringify(res.json).replace(/message [0-9a-f-]+ was refused/, "message ID was refused");
+    expect(words(unknown)).toBe(words(denied));
+  });
+
+  it("hands out through the inbox tool with ids, and returns a message that was not confirmed", async () => {
+    const r = await rig(ALLOW_ALL, 50);
+    // A cold session is not pushed to, so its messages wait for it to pull them.
+    await r.b.report("codex", [{ session: "b1", title: "Beta one", activity: "idle" }, { session: "b2", title: null, activity: "cold" }]);
+    const sent = await call(r.alpha, "send", { ...SEND, to_session: "b2", body: "wait for me" });
+    const id = String(sent.json["id"]);
+    const first = await call(r.beta, "inbox", { session: "b2" });
+    expect(first.json["messages"]).toEqual([{ id, text: expect.stringContaining("wait for me") }]);
+    expect(r.h.running.store.get(id)?.state).toBe("delivering");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const again = await call(r.beta, "inbox", { session: "b2" });
+    expect(JSON.stringify(again.json["messages"])).toContain("given to you before");
+    const confirmed = await call(r.beta, "inbox", { session: "b2", received: [id] });
+    expect(confirmed.json["messages"]).toEqual([]);
+    expect(r.h.running.store.get(id)).toMatchObject({ state: "delivered", certainty: "confirmed" });
   });
 
   it("holds a message for a person, shows it escaped, and delivers it once approved from the command line", async () => {

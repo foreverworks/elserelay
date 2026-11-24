@@ -36,7 +36,11 @@ export type Message = {
   readonly replyTo: string | null;
   readonly from: Sender;
   readonly to: Address;
+  /** Empty once the message is refused: a refused message keeps only the length and hash below. */
   readonly body: string;
+  /** Characters and SHA-256 of the body as it was sent, kept after a refusal wipes the text. */
+  readonly bodyChars: number;
+  readonly bodySha256: string;
   readonly createdAt: number;
   readonly expiresAt: number;
 };
@@ -57,6 +61,10 @@ export type Reason =
   | { readonly kind: "cold" }
   | { readonly kind: "unknown-peer" }
   | { readonly kind: "too-long"; readonly limit: number }
+  /** A handed-out message whose adapter never reported what happened to it. */
+  | { readonly kind: "no-outcome"; readonly ms: number }
+  /** The sender's container has had too many messages refused, so this one was not even recorded. */
+  | { readonly kind: "refusals"; readonly limit: number; readonly windowMs: number }
   | { readonly kind: "driver"; readonly detail: string };
 
 /** What happened to a message, as `states.ts` takes it. */
@@ -66,6 +74,8 @@ export type Event =
   | { readonly kind: "approve" }
   | { readonly kind: "queue" }
   | { readonly kind: "hand-out"; readonly attempt: number }
+  /** The receiving session fetched it through `inbox`; it does not count as an attempt. */
+  | { readonly kind: "pull" }
   | { readonly kind: "deliver"; readonly certainty: Certainty }
   | { readonly kind: "retry"; readonly reason: Reason }
   | { readonly kind: "expire" };
@@ -74,6 +84,8 @@ export type Tracked = {
   readonly message: Message;
   readonly state: State;
   readonly attempts: number;
+  /** In `delivering`: whether the session pulled it, so only its own acknowledgement or expiry ends it, and no timeout retries it. */
+  readonly pulled: boolean;
   readonly reason: Reason | null;
   readonly certainty: Certainty | null;
   readonly updatedAt: number;
@@ -103,6 +115,8 @@ export type Limits = {
   readonly messageTtlMs: number;
   readonly approvalTtlMs: number;
   readonly maxAttempts: number;
+  /** Refused messages per sender container; past it a refusal is not recorded. */
+  readonly refusals: { readonly messages: number; readonly windowMs: number };
 };
 
 export type Policy = {
@@ -111,10 +125,9 @@ export type Policy = {
 };
 
 /** An operator's stop or start, kept beside the message audit and as hard to change. */
-export type ControlEntry = {
-  readonly at: number;
-  readonly action: "stop" | "start";
-};
+export type ControlEntry =
+  | { readonly at: number; readonly action: "stop" | "start" }
+  | { readonly at: number; readonly action: "refusals-limited"; readonly container: string; readonly limit: number; readonly windowMs: number };
 
 export type AuditEntry = {
   readonly at: number;

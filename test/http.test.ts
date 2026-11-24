@@ -86,15 +86,24 @@ describe("the adapter channel", () => {
     const res = await ask(TOKENS["beta"], '{"session":"pull-1"}');
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    const answer = (await res.json()) as { messages: string[] };
+    const answer = (await res.json()) as { messages: { id: string; text: string }[] };
     expect(answer.messages).toHaveLength(1);
-    expect(answer.messages[0]).toContain("pull me");
-    expect(answer.messages[0]).toContain('Container: "alpha" (verified by the gateway)');
+    expect(answer.messages[0]?.text).toContain("pull me");
+    expect(answer.messages[0]?.text).toContain('Container: "alpha" (verified by the gateway)');
+    const id = answer.messages[0]?.id ?? "";
+    expect(id).toBe(String(sent.json["id"]));
     expect(await (await ask(TOKENS["beta"], '{"session":"pull-1"}')).json()).toEqual({ messages: [] });
+    // Handed out is not delivered until the session says it has the message.
+    expect(h.running.store.get(id)).toMatchObject({ state: "delivering", pulled: true });
+    // Another container's token cannot acknowledge it.
+    expect(await (await ask(TOKENS["alpha"], JSON.stringify({ session: "pull-1", received: [id], acknowledgeOnly: true }))).json()).toEqual({ messages: [] });
+    expect(h.running.store.get(id)?.state).toBe("delivering");
+    expect(await (await ask(TOKENS["beta"], JSON.stringify({ session: "pull-1", received: [id], acknowledgeOnly: true }))).json()).toEqual({ messages: [] });
+    expect(h.running.store.get(id)).toMatchObject({ state: "delivered", certainty: "confirmed" });
     // Another container's token reaches only its own sessions.
     expect(await (await ask(TOKENS["alpha"], '{"session":"pull-1"}')).json()).toEqual({ messages: [] });
 
-    for (const body of ["not json", "{}", '{"session":""}', '{"session":"s","extra":1}']) {
+    for (const body of ["not json", "{}", '{"session":""}', '{"session":"s","extra":1}', '{"session":"s","received":[1]}', '{"session":"s","received":"x"}']) {
       const bad = await ask(TOKENS["beta"], body);
       await bad.arrayBuffer();
       expect(bad.status, body).toBe(400);

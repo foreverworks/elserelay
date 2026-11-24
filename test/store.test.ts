@@ -28,7 +28,7 @@ describe("receive and get", () => {
   it("stores a message as received and reads it back unchanged", () => {
     const m = message("m1", { replyTo: "m0", from: { ...addr("alpha", "s9", "claude"), title: null } });
     const t = store.receive(m, 50);
-    expect(t).toEqual({ message: m, state: "received", attempts: 0, reason: null, certainty: null, updatedAt: 50 });
+    expect(t).toEqual({ message: m, state: "received", attempts: 0, pulled: false, reason: null, certainty: null, updatedAt: 50 });
     expect(store.get("m1")).toEqual(t);
   });
 
@@ -119,6 +119,42 @@ describe("queries", () => {
     expect(store.overdue(1000).map((t) => t.message.id)).toEqual(["a", "b"]);
   });
 
+  it("overdue leaves out a message the session pulled itself", () => {
+    store.receive(message("a"), 1);
+    store.receive(message("b"), 1);
+    handOut("a", 10);
+    store.apply("b", events.queue, 10);
+    store.apply("b", events.pull, 11);
+    expect(store.get("b")).toMatchObject({ state: "delivering", pulled: true, attempts: 0 });
+    expect(store.overdue(1000).map((t) => t.message.id)).toEqual(["a"]);
+  });
+
+  it("applyIf writes only while the message is still as it was read", () => {
+    store.receive(message("a"), 1);
+    store.apply("a", events.queue, 2);
+    const read = store.get("a");
+    if (read === null) throw new Error("missing");
+    store.apply("a", events.hold, 3);
+    expect(store.applyIf("a", events.expire, 4, read)).toBeNull();
+    expect(store.get("a")).toMatchObject({ state: "held", updatedAt: 3 });
+    expect(store.audit(0).map((e) => e.event)).toEqual(["receive", "queue", "hold"]);
+    const now = store.get("a");
+    if (now === null) throw new Error("missing");
+    expect(store.applyIf("a", events.expire, 5, now)?.state).toBe("expired");
+    expect(store.applyIf("nope", events.expire, 5, now)).toBeNull();
+  });
+
+  it("a refused message keeps no body, only its length and hash", () => {
+    store.receive(message("a", { body: "secret ééé" }), 1);
+    const before = store.get("a");
+    store.apply("a", events.refuse, 2);
+    const after = store.get("a");
+    expect(after?.message.body).toBe("");
+    expect(after?.message.bodyChars).toBe(10);
+    expect(after?.message.bodySha256).toBe(before?.message.bodySha256);
+    expect(after?.message.bodySha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("expired lists what is past its expiry and not final", () => {
     store.receive(message("a", { expiresAt: 100 }), 1);
     store.receive(message("b", { expiresAt: 200 }), 1);
@@ -150,6 +186,57 @@ describe("queries", () => {
     expect(store.sentSince("alpha", "beta", 21)).toBe(0);
     expect(store.sentSince("other", "beta", 0)).toBe(1);
     expect(store.sentSince("beta", "alpha", 0)).toBe(0);
+  });
+});
+
+describe("refusals and the hops a session was handed", () => {
+  it("refusedSince counts one container's refused messages since a time", () => {
+    for (const [id, at] of [["a", 10], ["b", 20], ["c", 30]] as const) {
+      store.receive(message(id), at);
+      store.apply(id, events.refuse, at + 1);
+    }
+    store.receive(message("d"), 30);
+    store.receive(message("e", { from: { ...addr("other"), title: null } }), 30);
+    store.apply("e", events.refuse, 31);
+    expect(store.refusedSince("alpha", 0)).toBe(3);
+    expect(store.refusedSince("alpha", 20)).toBe(2);
+    expect(store.refusedSince("other", 0)).toBe(1);
+  });
+
+  it("noteRefusalLimit writes one line per window and container, and shows it in the control audit", () => {
+    expect(store.noteRefusalLimit("alpha", 100, 60, 1000)).toBe(true);
+    expect(store.noteRefusalLimit("alpha", 1099, 60, 1000)).toBe(false);
+    expect(store.noteRefusalLimit("other", 1099, 60, 1000)).toBe(true);
+    expect(store.noteRefusalLimit("alpha", 1100, 60, 1000)).toBe(true);
+    store.setStopped(true, 500);
+    expect(store.controlAudit(0)).toEqual([
+      { at: 100, action: "refusals-limited", container: "alpha", limit: 60, windowMs: 1000 },
+      { at: 500, action: "stop" },
+      { at: 1099, action: "refusals-limited", container: "other", limit: 60, windowMs: 1000 },
+      { at: 1100, action: "refusals-limited", container: "alpha", limit: 60, windowMs: 1000 },
+    ]);
+  });
+
+  it("lastReceived finds the newest message handed to a session by a container within the time", () => {
+    const from = { ...addr("alpha"), title: null };
+    for (const [id, hop] of [["a", 0], ["b", 1], ["c", 2], ["d", 3]] as const) {
+      store.receive(message(id, { hop, from, createdAt: 1 }), 1);
+      store.apply(id, events.queue, 2);
+    }
+    store.receive(message("e", { hop: 9, from: { ...addr("other"), title: null } }), 1);
+    store.apply("e", events.queue, 2);
+    store.apply("e", { kind: "hand-out", attempt: 1 }, 3);
+    store.apply("a", { kind: "hand-out", attempt: 1 }, 10);
+    store.apply("a", events.deliver, 11);
+    store.apply("b", events.pull, 20);
+    store.apply("c", { kind: "hand-out", attempt: 1 }, 30);
+    store.apply("c", events.retry, 31);
+    // a was delivered, b is pulled and not yet confirmed, c went back to the queue, d never left, e is from elsewhere.
+    expect(store.lastReceived(addr("beta"), "alpha", 0)?.message.id).toBe("b");
+    expect(store.lastReceived(addr("beta"), "alpha", 12)?.message.id).toBe("b");
+    expect(store.lastReceived(addr("beta"), "alpha", 21)).toBeNull();
+    expect(store.lastReceived(addr("beta", "other"), "alpha", 0)).toBeNull();
+    expect(store.lastReceived(addr("beta"), "nobody", 0)).toBeNull();
   });
 });
 
@@ -300,7 +387,7 @@ describe("a store file", () => {
 
     const raw = new DatabaseSync(path);
     expect(raw.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-    expect(raw.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+    expect(raw.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
     raw.close();
   });
 
@@ -335,21 +422,70 @@ describe("a store file", () => {
     raw.close();
   });
 
+  /** A file as an older build left it: the version 3 additions removed again, whatever the rows hold. */
+  function downgrade(path: string, version: 1 | 2): void {
+    const raw = new DatabaseSync(path);
+    raw.exec("DROP TABLE refusal_notices");
+    raw.exec("DROP INDEX messages_by_sender");
+    for (const column of ["body_chars", "body_sha256", "pulled"]) raw.exec(`ALTER TABLE messages DROP COLUMN ${column}`);
+    if (version === 1) raw.exec("DROP TABLE control_log");
+    raw.exec(`PRAGMA user_version = ${version}`);
+    raw.close();
+  }
+
   it("opens a version 1 file, adds the control log and keeps its messages", () => {
     const path = join(dir, "old.sqlite");
     const first = openStore(path);
     first.receive(message("a"), 1);
     first.close();
-    const raw = new DatabaseSync(path);
-    raw.exec("DROP TABLE control_log");
-    raw.exec("PRAGMA user_version = 1");
-    raw.close();
+    downgrade(path, 1);
 
     const second = openStore(path);
     expect(second.get("a")?.state).toBe("received");
     second.setStopped(true, 5);
     expect(second.controlAudit(0)).toEqual([{ at: 5, action: "stop" }]);
     second.close();
+  });
+
+  it("opens a version 2 file: hashes every body, wipes the text of refused messages, and rewords a lost outcome", () => {
+    const path = join(dir, "v2.sqlite");
+    const first = openStore(path);
+    first.receive(message("kept", { body: "stay" }), 1);
+    first.apply("kept", events.queue, 2);
+    first.receive(message("gone", { body: "secret" }), 1);
+    first.apply("gone", events.queue, 2);
+    first.apply("gone", events.refuse, 3);
+    first.receive(message("lost", { body: "again" }), 1);
+    first.apply("lost", events.queue, 2);
+    first.apply("lost", { kind: "hand-out", attempt: 1 }, 3);
+    first.apply("lost", { kind: "retry", reason: { kind: "driver", detail: "no outcome within 1000 ms" } }, 4);
+    first.close();
+    downgrade(path, 2);
+    const raw = new DatabaseSync(path);
+    raw.exec("UPDATE messages SET body = 'secret' WHERE id = 'gone'");
+    raw.close();
+
+    const second = openStore(path);
+    const hash = (text: string): string => message("x", { body: text }).bodySha256;
+    expect(second.get("kept")?.message).toMatchObject({ body: "stay", bodyChars: 4, bodySha256: hash("stay") });
+    expect(second.get("gone")?.message).toMatchObject({ body: "", bodyChars: 6, bodySha256: hash("secret") });
+    expect(second.get("lost")).toMatchObject({ state: "queued", pulled: false, reason: { kind: "no-outcome", ms: 1000 } });
+    expect(second.noteRefusalLimit("alpha", 1, 60, 1000)).toBe(true);
+    second.close();
+    const again = new DatabaseSync(path);
+    expect(again.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
+    again.close();
+  });
+
+  it("the refusal notices refuse UPDATE and DELETE like the control log", () => {
+    const path = join(dir, "gw.sqlite");
+    const s = openStore(path);
+    s.noteRefusalLimit("alpha", 1, 60, 1000);
+    s.close();
+    const raw = new DatabaseSync(path);
+    expect(() => raw.exec("UPDATE refusal_notices SET container = 'x'")).toThrow(/never changed/);
+    expect(() => raw.exec("DELETE FROM refusal_notices")).toThrow(/never removed/);
+    raw.close();
   });
 
   it("the tables are strict", () => {

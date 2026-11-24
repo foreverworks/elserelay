@@ -22,7 +22,20 @@ export function reasonText(reason: Reason): string {
       return "no such session is listed; call list_peers";
     case "too-long":
       return `the message is longer than ${reason.limit} characters`;
+    case "no-outcome":
+      return `the receiving product did not say within ${Math.round(reason.ms / 1000)} seconds whether it took the message`;
+    case "refusals":
+      return `too many of your messages were refused (more than ${reason.limit} within ${Math.round(reason.windowMs / 60_000)} minutes), so this one was not recorded`;
     case "driver":
       return `the receiving product could not take it: ${oneLine(reason.detail)}`;
   }
+}
+
+/**
+ * The reason as the sender reads it. A policy refusal never names its rule: the rule is the operator's to know, and a sender that could
+ * read it would learn the policy one probe at a time. An unknown container is answered the same way, so it cannot be told apart from a
+ * container the sender may not reach.
+ */
+export function senderText(reason: Reason): string {
+  return reason.kind === "policy" ? "no policy rule lets you message that session" : reasonText(reason);
 }

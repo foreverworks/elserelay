@@ -10,6 +10,7 @@ const DEFAULT_LIMITS = {
   messageTtlMs: 86_400_000,
   approvalTtlMs: 900_000,
   maxAttempts: 5,
+  refusals: { messages: 60, windowMs: 3_600_000 },
 };
 
 function parsed(json: unknown): Policy {

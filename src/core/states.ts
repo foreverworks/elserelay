@@ -21,7 +21,8 @@ export function step(tracked: Tracked, event: Event, at: number): Step {
 
   switch (event.kind) {
     case "refuse":
-      return go({ state: "refused", reason: event.reason });
+      // A refused message keeps no text, only the length and hash it was stored with.
+      return go({ state: "refused", reason: event.reason, message: { ...tracked.message, body: "" } });
     case "hold":
       // A queued message is held again when a rule that let it through now asks: see `service.ts`.
       return state === "received" || state === "queued" ? go({ state: "held" }) : no();
@@ -35,11 +36,14 @@ export function step(tracked: Tracked, event: Event, at: number): Step {
       if (event.attempt !== tracked.attempts + 1) {
         return { ok: false, why: `hand-out attempt ${event.attempt} does not follow ${tracked.attempts} earlier attempts` };
       }
-      return go({ state: "delivering", attempts: event.attempt });
+      return go({ state: "delivering", attempts: event.attempt, pulled: false });
+    case "pull":
+      // A pulled message that was not acknowledged is pulled again, which only renews its time.
+      return state === "queued" || (state === "delivering" && tracked.pulled) ? go({ state: "delivering", pulled: true }) : no();
     case "deliver":
       return state === "delivering" ? go({ state: "delivered", certainty: event.certainty }) : no();
     case "retry":
-      return state === "delivering" ? go({ state: "queued", reason: event.reason }) : no();
+      return state === "delivering" ? go({ state: "queued", reason: event.reason, pulled: false }) : no();
     case "expire":
       // A message that has only been received is decided at once, so it never waits long enough to expire.
       return state === "received" ? no() : go({ state: "expired" });

@@ -81,7 +81,13 @@ export async function runAdmin(argv: readonly string[], env: Readonly<Record<str
           }
           const answered = command === "approve" ? service.approve(id) : service.refuse(id);
           if (!answered.ok) {
-            io.err(answered.why === "not-found" ? `no message ${id}` : `message ${id} is not waiting for an answer`);
+            io.err(
+              answered.why === "not-found"
+                ? `no message ${id}`
+                : answered.why === "timed-out"
+                  ? `message ${id} was waiting past its deadline, so it was refused as unanswered`
+                  : `message ${id} is not waiting for an answer`,
+            );
             return 1;
           }
           io.out(`${command === "approve" ? "approved" : "refused"} ${id}`);
@@ -100,7 +106,13 @@ export async function runAdmin(argv: readonly string[], env: Readonly<Record<str
           }
           const lines = [
             ...store.audit(since).map((entry) => ({ at: entry.at, line: auditLine(entry) })),
-            ...store.controlAudit(since).map((entry) => ({ at: entry.at, line: `${new Date(entry.at).toISOString()} ${entry.action} by the operator` })),
+            ...store.controlAudit(since).map((entry) => ({
+              at: entry.at,
+              line:
+                entry.action === "refusals-limited"
+                  ? `${new Date(entry.at).toISOString()} refusals of ${escapeForTerminal(entry.container).replace(/\n/g, " ")} are not recorded: more than ${entry.limit} refused within ${Math.round(entry.windowMs / 60_000)} minutes`
+                  : `${new Date(entry.at).toISOString()} ${entry.action} by the operator`,
+            })),
           ];
           // A stable sort: lines of one millisecond keep the messages first.
           lines.sort((a, b) => a.at - b.at).forEach((l) => io.out(l.line));

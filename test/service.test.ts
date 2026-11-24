@@ -41,11 +41,11 @@ describe("send", () => {
     expect(store.audit(0)).toEqual([]);
   });
 
-  it("stores and audits a refusal for a target container that is not configured", () => {
+  it("stores and audits a refusal for a target container that is not configured, and tells the sender it was a policy refusal", () => {
     const { service, store } = make();
     const sent = service.send("alpha", alpha, to("x", "nowhere"), "hi");
-    expect(sent).toMatchObject({ kind: "refused", reason: { kind: "unknown-peer" } });
-    expect(store.get("id1")?.state).toBe("refused");
+    expect(sent).toMatchObject({ kind: "refused", reason: { kind: "policy", rule: null } });
+    expect(store.get("id1")).toMatchObject({ state: "refused", reason: { kind: "unknown-peer" } });
     expect(store.audit(0).map((a) => a.event)).toEqual(["receive", "refuse"]);
   });
 
@@ -283,7 +283,7 @@ describe("nextFor", () => {
     expect(r.store.get(id)).toMatchObject({ state: "refused", reason: { kind: "policy", rule: "closed" } });
   });
 
-  it("does not push a message that has been approved when its rule still says ask", () => {
+  it("pushes a message that has been approved when its rule still says ask", () => {
     const r = make({ rules: [{ name: "ask", from: {}, to: {}, decision: "ask" }] });
     const id = queue(r, "b1");
     expect(r.service.approve(id)).toEqual({ ok: true });
@@ -494,7 +494,7 @@ describe("stop", () => {
 });
 
 describe("inbox", () => {
-  it("hands out the session's waiting messages oldest first, delivered with certainty confirmed and read", () => {
+  it("hands out the session's waiting messages oldest first, as delivering until the session confirms them", () => {
     const r = make();
     const first = r.service.send("alpha", alpha, to("b2"), "one");
     const second = r.service.send("alpha", alpha, to("b2"), "two");
@@ -502,8 +502,11 @@ describe("inbox", () => {
     const got = r.service.inbox("beta", "b2");
     expect(got.kind === "ok" && got.messages.map((m) => m.id)).toEqual([first.id, second.id]);
     expect(got.kind === "ok" && got.messages[0]?.text).toContain("one");
-    expect(r.store.get(first.id)).toMatchObject({ state: "delivered", certainty: "confirmed", attempts: 1 });
+    expect(r.store.get(first.id)).toMatchObject({ state: "delivering", pulled: true, attempts: 0 });
     expect(r.service.inbox("beta", "b2")).toEqual({ kind: "ok", messages: [] });
+    expect(r.service.inbox("beta", "b2", [first.id])).toEqual({ kind: "ok", messages: [] });
+    expect(r.store.get(first.id)).toMatchObject({ state: "delivered", certainty: "confirmed", attempts: 0 });
+    expect(r.store.get(second.id)?.state).toBe("delivering");
   });
 
   it("works for a cold session, and nothing is pushed afterwards", () => {
@@ -603,7 +606,7 @@ describe("tick", () => {
     expect(r.store.get(sent.id)?.state).toBe("delivering");
     r.clock.t += 1;
     r.service.tick();
-    expect(r.store.get(sent.id)).toMatchObject({ state: "queued", reason: { kind: "driver" } });
+    expect(r.store.get(sent.id)).toMatchObject({ state: "queued", reason: { kind: "no-outcome", ms: 1000 } });
     expect(r.service.nextFor("beta").map((h) => [h.id, h.attempt])).toEqual([[sent.id, 2]]);
   });
 
@@ -614,7 +617,7 @@ describe("tick", () => {
     r.service.nextFor("beta");
     r.clock.t += 1001;
     r.service.tick();
-    expect(r.store.get(sent.id)).toMatchObject({ state: "refused", reason: { kind: "driver" } });
+    expect(r.store.get(sent.id)).toMatchObject({ state: "refused", reason: { kind: "no-outcome", ms: 1000 } });
   });
 
   it("refuses a held message nobody answered within the approval time", () => {

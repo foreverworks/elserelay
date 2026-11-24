@@ -26,7 +26,7 @@ export type HookDeps = {
 };
 
 const input = z.object({ conversationId: z.string().min(1).max(200) });
-const answer = z.object({ messages: z.array(z.string()) });
+const answer = z.object({ messages: z.array(z.object({ id: z.string(), text: z.string() })) });
 const settings = z.object({ GATEWAY_URL: z.url(), GATEWAY_TOKEN_FILE: z.string().min(1) });
 
 /** Settles with `promise`, or rejects when the signal fires first. */
@@ -38,7 +38,9 @@ function before<T>(signal: AbortSignal, promise: Promise<T>): Promise<T> {
   });
 }
 
-async function pull(deps: HookDeps, signal: AbortSignal): Promise<readonly string[]> {
+type Pulled = { readonly messages: InboxAnswer["messages"]; readonly acknowledge: () => Promise<void> };
+
+async function pull(deps: HookDeps, signal: AbortSignal): Promise<Pulled> {
   const config = settings.parse(Object.fromEntries(Object.entries(deps.env).filter(([, v]) => v !== undefined && v !== "")));
   let stdin: unknown;
   try {
@@ -51,30 +53,42 @@ async function pull(deps: HookDeps, signal: AbortSignal): Promise<readonly strin
   const token = (await before(signal, deps.readFile(config.GATEWAY_TOKEN_FILE))).trim();
   if (token === "") throw new Error("the token file is empty");
 
-  const body: InboxRequest = { session: conversationId };
-  const res = await deps.fetch(new URL(INBOX_PATH, config.GATEWAY_URL), {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
+  const post = (body: InboxRequest): Promise<Response> =>
+    deps.fetch(new URL(INBOX_PATH, config.GATEWAY_URL), {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  const res = await post({ session: conversationId });
   if (!res.ok) {
     await res.body?.cancel();
     throw new Error(`the broker answered ${res.status}`);
   }
   const parsed: InboxAnswer = answer.parse(await before(signal, res.json()));
-  return parsed.messages;
+  const received = parsed.messages.map((m) => m.id);
+  return {
+    messages: parsed.messages,
+    acknowledge: async () => {
+      const done = await post({ session: conversationId, received, acknowledgeOnly: true });
+      await done.body?.cancel();
+    },
+  };
 }
 
 /** Always returns 0. */
 export async function runAntigravityHook(deps: HookDeps): Promise<number> {
   const signal = AbortSignal.timeout(deps.timeoutMs ?? HOOK_TIMEOUT_MS);
+  let pulled: Pulled;
   try {
-    const messages = await pull(deps, signal);
-    if (messages.length > 0) deps.out(JSON.stringify({ injectSteps: messages.map((userMessage) => ({ userMessage })) }));
+    pulled = await pull(deps, signal);
+    if (pulled.messages.length > 0) deps.out(JSON.stringify({ injectSteps: pulled.messages.map((m) => ({ userMessage: m.text })) }));
   } catch (error) {
     // One line naming the failure, never a message text or the token. stdout stays empty.
     deps.err(`agent-gateway hook: ${error instanceof Error ? error.message.split("\n")[0] : "failed"}`);
+    return 0;
   }
+  // Only after the text has been written is it known to have left; a failure here is ignored, and the broker returns the messages later.
+  if (pulled.messages.length > 0) await pulled.acknowledge().catch(() => undefined);
   return 0;
 }

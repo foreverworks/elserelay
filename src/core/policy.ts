@@ -28,6 +28,9 @@ const limits = z
     messageTtlMs: count.default(86_400_000),
     approvalTtlMs: count.default(900_000),
     maxAttempts: count.default(5),
+    refusals: z
+      .strictObject({ messages: count.default(60), windowMs: count.default(3_600_000) })
+      .prefault({}),
   })
   .prefault({});
 

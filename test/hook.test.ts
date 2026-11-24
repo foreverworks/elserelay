@@ -75,13 +75,33 @@ const withUrl = (url: string): Partial<HookDeps> => ({ env: { GATEWAY_URL: url, 
 
 describe("the Antigravity hook", () => {
   it("posts the conversation id with the token and prints each waiting message as an injected user message", async () => {
-    const s = await stub((respond) => respond(200, JSON.stringify({ messages: ["first", "second \"quoted\"\nline"] })));
+    const s = await stub((respond) => respond(200, JSON.stringify({ messages: [{ id: "m1", text: "first" }, { id: "m2", text: "second \"quoted\"\nline" }] })));
     const run = await hook(withUrl(s.url));
     expect(run.code).toBe(0);
     expect(run.err).toEqual([]);
     expect(run.out).toHaveLength(1);
     expect(JSON.parse(run.out[0] ?? "")).toEqual({ injectSteps: [{ userMessage: "first" }, { userMessage: "second \"quoted\"\nline" }] });
-    expect(s.seen).toEqual([{ auth: "Bearer secret-token", body: JSON.stringify({ session: "conv-1" }) }]);
+    expect(s.seen).toEqual([
+      { auth: "Bearer secret-token", body: JSON.stringify({ session: "conv-1" }) },
+      { auth: "Bearer secret-token", body: JSON.stringify({ session: "conv-1", received: ["m1", "m2"], acknowledgeOnly: true }) },
+    ]);
+  });
+
+  it("writes its output before it acknowledges, and ignores a failed acknowledgement", async () => {
+    const s = await stub((respond, req) => (req.body.includes("acknowledgeOnly") ? respond(500, "no") : respond(200, JSON.stringify({ messages: [{ id: "m1", text: "x" }] }))));
+    const written: string[] = [];
+    const seenWhenWritten: number[] = [];
+    const run = await hook({ ...withUrl(s.url), out: (t) => { seenWhenWritten.push(s.seen.length); written.push(t); } });
+    expect(seenWhenWritten).toEqual([1]);
+    expect(s.seen).toHaveLength(2);
+    expect(run).toMatchObject({ code: 0, err: [] });
+    expect(written).toHaveLength(1);
+  });
+
+  it("does not acknowledge when nothing was handed out", async () => {
+    const s = await stub((respond) => respond(200, JSON.stringify({ messages: [] })));
+    await hook(withUrl(s.url));
+    expect(s.seen).toHaveLength(1);
   });
 
   it("prints nothing when nothing waits", async () => {
@@ -91,7 +111,7 @@ describe("the Antigravity hook", () => {
   });
 
   it("ignores the rest of the hook's input", async () => {
-    const s = await stub((respond) => respond(200, '{"messages":["x"]}'));
+    const s = await stub((respond) => respond(200, '{"messages":[{"id":"m1","text":"x"}]}'));
     const run = await hook({ ...withUrl(s.url), stdin: JSON.stringify({ conversationId: "c9", workspacePaths: ["/w"], invocationNum: 3, lastUserInput: "hi" }) });
     expect(run.out).toHaveLength(1);
     expect(s.seen[0]?.body).toBe(JSON.stringify({ session: "c9" }));
@@ -150,7 +170,7 @@ describe("the Antigravity hook", () => {
   });
 
   it("prints nothing when the broker refuses the token, or fails, or answers nonsense", async () => {
-    for (const [status, body] of [[401, "a bearer token is required"], [403, "no"], [500, "oops"], [200, "not json"], [200, '{"messages":"x"}'], [200, '{"messages":[1]}'], [200, "{}"]] as const) {
+    for (const [status, body] of [[401, "a bearer token is required"], [403, "no"], [500, "oops"], [200, "not json"], [200, '{"messages":"x"}'], [200, '{"messages":[1]}'], [200, '{"messages":["x"]}'], [200, "{}"]] as const) {
       const s = await stub((respond) => respond(status, body));
       const run = await hook(withUrl(s.url));
       expect(run.out, `${status} ${body}`).toEqual([]);

@@ -38,7 +38,11 @@ const outcomeSchema = z.strictObject({
   ]),
 });
 
-const inboxSchema = z.strictObject({ session: text });
+const inboxSchema = z.strictObject({
+  session: text,
+  received: z.array(text).max(100).optional(),
+  acknowledgeOnly: z.boolean().optional(),
+});
 
 export type Channel = {
   readonly handle: (req: IncomingMessage, res: ServerResponse) => void;
@@ -152,10 +156,17 @@ export function makeChannel(deps: ChannelDeps): Channel {
     if (path === INBOX_PATH) {
       const body = await readJson(req, res, inboxSchema);
       if (body === undefined) return;
-      const request: InboxRequest = body;
-      const result = service.inbox(container, request.session);
+      const request: InboxRequest = {
+        session: body.session,
+        ...(body.received === undefined ? {} : { received: body.received }),
+        ...(body.acknowledgeOnly === undefined ? {} : { acknowledgeOnly: body.acknowledgeOnly }),
+      };
+      const result =
+        request.acknowledgeOnly === true
+          ? { ...service.acknowledge(container, request.session, request.received ?? []), messages: [] }
+          : service.inbox(container, request.session, request.received);
       if (result.kind !== "ok") return plainReply(res, 403, "this token's container is not configured");
-      const answer: InboxAnswer = { messages: result.messages.map((m) => m.text) };
+      const answer: InboxAnswer = { messages: result.messages };
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(answer));
       return;
     }

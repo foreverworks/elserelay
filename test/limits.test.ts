@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { limitReason } from "../src/core/limits.js";
+import { limitReason, refusalsReason } from "../src/core/limits.js";
 import type { Limits } from "../src/core/types.js";
 
 const limits: Limits = {
@@ -9,6 +9,7 @@ const limits: Limits = {
   messageTtlMs: 1,
   approvalTtlMs: 1,
   maxAttempts: 5,
+  refusals: { messages: 60, windowMs: 3_600_000 },
 };
 const ok = { hop: 0, bodyChars: 1, sentInWindow: 0 };
 
@@ -38,5 +39,12 @@ describe("limitReason", () => {
     expect(limitReason(limits, all)?.kind).toBe("too-long");
     expect(limitReason(limits, { ...all, bodyChars: 1 })?.kind).toBe("hops");
     expect(limitReason(limits, { ...all, bodyChars: 1, hop: 0 })?.kind).toBe("rate");
+  });
+});
+
+describe("refusalsReason", () => {
+  it("allows refusals under the budget and stops recording at it", () => {
+    expect(refusalsReason(limits, 59)).toBeNull();
+    expect(refusalsReason(limits, 60)).toEqual({ kind: "refusals", limit: 60, windowMs: 3_600_000 });
   });
 });
