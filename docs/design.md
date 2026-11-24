@@ -26,7 +26,12 @@ whether it may go, who it came from, and whether a person has to say yes first.
 - **One broker**, in a container of its own. It never connects to an agent.
 - **One adapter per agent container**, beside the CLI, never in front of it. It
   dials out to the broker, reports the sessions it sees, and delivers messages
-  through a driver.
+  through a driver. `GATEWAY_SESSIONS`, a comma-separated list of session ids,
+  is optional: when it is set the adapter reports only those sessions and
+  refuses a delivery to any other with `retry: false`, whatever the broker asks.
+  The list is the container's own, so it holds when the broker is wrong or
+  hostile. It limits the adapter, not the hook, which only pulls what the broker
+  holds for the conversation it is run for.
 - **One driver per product.** It knows how that product takes a message and
   holds no policy: `list`, `deliver`, `status`, `capabilities`.
 - **Agents speak MCP to the broker**: `list_peers`, `send`, `inbox`, `reply`. A
@@ -34,9 +39,10 @@ whether it may go, who it came from, and whether a person has to say yes first.
 - **A product that cannot be pushed to** has a hook instead. The hook runs
   `agent-gateway hook <product>`, which asks the broker for the session's waiting
   messages (`POST /adapter/inbox`, with the container's token, the same service
-  call as the MCP `inbox`) and prints them in the product's own format. A hook
-  never delays or breaks the agent: it has three seconds, and any failure prints
-  nothing.
+  call as the MCP `inbox`) and prints them in the product's own format. Once its
+  output is written it confirms the messages with a second request to the same
+  path, and ignores a failure of that request. A hook never delays or breaks the
+  agent: it has three seconds, and any failure prints nothing.
 
 If the gateway stops, agents keep working and only messages wait.
 
@@ -46,11 +52,21 @@ A bearer token names a **container**. The broker takes the sender's container
 from the token and never from the call, so a container cannot speak for another.
 The **session** inside it is a claim: the adapter and the agent run as the same
 user, so a compromised container can lie about which of its sessions is speaking.
-Policy therefore decides on containers and products. A session id is for
-addressing and for the reader of the log. The product is bound to the container
+Policy therefore decides on containers and products, and so does every limit
+that has to hold against a lying container: the rate per pair of containers is
+the bound it cannot pass by changing the session it claims. A session id is for
+addressing and for the reader of the log, and what a session or an adapter
+reports as its id or title is cleaned to one line of plain characters before it
+is stored; a session id that cleaning would change is left out of the report. The product is bound to the container
 by the broker's config, not by what an adapter reports: a token whose label the
 config does not list, or a report naming another product than its container's,
 is refused with a 403.
+
+A sender is told as little as the policy allows. A refusal by policy says that
+no rule lets it message that session and never names the rule, which the
+operator reads in the audit. A message to a container the broker does not know
+is answered in the same words and the same shape, so a sender cannot tell a
+container it may not reach from one that does not exist.
 
 ## Provenance
 
@@ -93,10 +109,42 @@ Some products acknowledge nothing, so a driver reports how sure it is:
 `confirmed` (the product answered), `accepted` (it took the bytes and said
 nothing).
 
+A message leaves in one of two ways, and `delivering` covers both.
+
+- **Pushed.** The broker hands it to the container's adapter, which hands it to
+  the driver and reports the outcome. A definite failure puts it back in the
+  queue and counts as an attempt. A handed-out message whose outcome never
+  arrives within the delivery timeout goes back to the queue too, marked as one
+  with no outcome, and counts as an attempt; after `maxAttempts` it is refused.
+- **Pulled.** The session calls `inbox` (or the hook does). The messages come
+  out as `delivering`, marked as pulled, and a pull is not an attempt. They
+  become `delivered`, with certainty `confirmed`, when the session passes their
+  ids in `received` on its next `inbox` call, or answers them. A pulled message
+  nobody confirmed comes back on the next `inbox` call after the delivery
+  timeout, with one line before it saying it was given before. Only its
+  expiry ends it. The push path never retries a pulled message and is not held
+  up by one.
+
+`inbox` does not hand out a message whose last push ended with no outcome: the
+adapter may have handed it over, so only the push path retries it, with the same
+id, and the adapter drops an id it has already handed over. A message whose last
+push failed with a definite outcome may be pulled.
+
 Delivery is at least once. A message keeps one id through every retry, and an
-adapter drops an id it has already handed over. An adapter that dies between
-handing over and acknowledging can deliver twice; a message must not be the only
-guard in front of an action that cannot be repeated.
+adapter drops an id it has already handed over, also after a restart: the ids
+are on disk, the file and its directory flushed, before the adapter reports an
+outcome. An adapter that dies between handing over and acknowledging can deliver
+twice; a message must not be the only guard in front of an action that cannot be
+repeated. The Claude driver does not retry a socket that failed after the line
+was written (the outcome is unknown, so the message is refused and the sender
+is told); it retries a failure before the write.
+
+Writes that the clock decides on (an expiry, a delivery timeout, an approval
+that ran out) apply only if the message is still in the state they read, so
+they cannot undo an answer given at the same moment, from the command line say.
+
+A refused message keeps no text. Its length and the SHA-256 of its body stay,
+and the body is removed whenever a message is refused, whether at once or later.
 
 ## Limits
 
@@ -104,7 +152,19 @@ Two agents can answer each other for ever, and waking a large session that went
 cold makes it read its whole context again.
 
 - **Hops:** a reply adds one to its thread's count; past the limit it is refused.
+  They stop agents that loop by themselves, so they also count through `send`: a
+  `send` from a session that was handed a message by the target container within
+  the last hour starts at that message's hop plus one, in a new thread, and is
+  refused past the limit like a reply. The session is a claim, so an agent in a
+  compromised container can start from zero by naming another one; the pair rate
+  below is the bound it cannot pass.
 - **Rate:** messages per pair of containers in a sliding window.
+- **Refusals:** refused messages per sender container in a sliding window
+  (`limits.refusals`, 60 an hour by default). Past it a refusal is not stored at
+  all, the sender is told so, and one line per window and container goes to the
+  control log beside the audit. The body is cleared before anything is stored
+  for a refused message, so a container that only sends refusable messages
+  cannot fill the store.
 - **Waking:** off by default. A message to a cold session waits in its inbox until
   its next turn. A rule can allow waking for a pair.
 - **Stop:** one switch. At send, a message is refused with the reason `stopped`
@@ -126,7 +186,9 @@ Every limit refuses with a reason the sender can read.
 
 An interface: it gets a request (who, to whom, the text) and answers yes, no or
 nothing yet. The default is a command-line approver. Deployments plug in their
-own.
+own. A yes that arrives at or after the deadline is a refusal with the reason
+`timeout`: the sender may already have been told that no answer in time is a
+refusal.
 
 ## What this does not do
 

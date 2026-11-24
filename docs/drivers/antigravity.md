@@ -38,8 +38,13 @@ that makes a model treat it with less authority is the better one. Which of the
 two that is has to be measured against a logged-in agent; until then this is a
 guess, and the rendered text says in its own words that it is data.
 
-Delivery through the hook is at most once: the broker marks a message delivered
-when it answers the hook, and a hook that dies after that loses it.
+Delivery through the hook is at least once. The broker hands a message out as
+`delivering`, and the hook confirms it with a second request to the same path
+(`received` and `acknowledgeOnly`) only after it has written its output. A hook
+that dies before that, or whose confirmation fails, loses nothing: the broker
+gives the message out again after its delivery timeout, with a first line saying
+it was given before. A failed confirmation is ignored, as is any other failure of
+the hook.
 
 ## `agy agentapi send-message`
 
