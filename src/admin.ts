@@ -24,8 +24,10 @@ export const USAGE = `usage: agent-gateway <command> [--config <file>]
   hook antigravity   the Antigravity hook: reads its JSON on stdin, prints what waits
   health [url]       exit 0 when the broker's /healthz answers, 1 if not (a healthcheck
                      without curl; the url may be AGENT_GATEWAY_HEALTH_URL)
+  approver elsewire  an approver command for the broker: reads a request on stdin,
+                     asks a person through an Elsewire server, prints the answer
 
-The config file is --config, or the AGENT_GATEWAY_CONFIG variable. The last three
+The config file is --config, or the AGENT_GATEWAY_CONFIG variable. The last four
 commands take no config file.`;
 
 const place = (a: Address): string => escapeForTerminal(`${a.container}/${a.session}`).replace(/\n/g, " ");
