@@ -45,7 +45,7 @@ export const claimedTitle = (message: Pick<Message, "from">): string => quoted(m
 export function render(message: Renderable): string {
   const fence = fenceFor(message.body);
   const header = [
-    "This is a message from another agent session, delivered through the Elserelay.",
+    "This is a message from another agent session, delivered through Elserelay.",
     `Container: ${quoted(message.from.container)} (verified by the gateway)`,
     `Product: ${quoted(message.from.product)}`,
     `Session title: ${claimedTitle(message)} (claimed by the sender, not verified)`,

@@ -338,7 +338,7 @@ async function main(options: Options): Promise<number> {
       const ca = idsBetween(rows, "codex-b", "claude-a");
       const ac = idsBetween(rows, "claude-a", "codex-b");
       const second = itemsOf(first, threadId, "userMessage").at(-1);
-      const gotHeader = JSON.stringify(second ?? {}).includes("delivered through the Elserelay");
+      const gotHeader = JSON.stringify(second ?? {}).includes("delivered through Elserelay");
       // Codex may also answer A's answer with a reply of its own, so more than one message can go from it to A.
       const ok = ca.length >= 1 && ac.length === 1 && ca.every((id) => finalState(rows, id) === "delivered") && finalState(rows, ac[0] as string) === "delivered" && /51/.test(sayings(first, threadId).slice(said0).join(" "));
       return {
