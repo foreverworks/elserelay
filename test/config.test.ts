@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -95,5 +95,17 @@ describe("loadConfig", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("docs/deploy.md", () => {
+  it("has a complete example that the broker accepts", () => {
+    const doc = readFileSync(new URL("../docs/deploy.md", import.meta.url), "utf8");
+    const example = /```json\n([\s\S]*?)\n```/.exec(doc)?.[1];
+    expect(example).toBeDefined();
+    const r = parseConfig(JSON.parse(example ?? ""));
+    if (!r.ok) throw new Error(r.problems.join("; "));
+    expect(r.config.approver.kind).toBe("command");
+    expect(r.config.products.get("notes-box")).toBe("antigravity");
   });
 });

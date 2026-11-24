@@ -210,11 +210,115 @@ Every limit refuses with a reason the sender can read.
 
 ## Approver
 
-An interface: it gets a request (who, to whom, the text) and answers yes, no or
-nothing yet. The default is a command-line approver. Deployments plug in their
-own. A yes that arrives at or after the deadline is a refusal with the reason
-`timeout`: the sender may already have been told that no answer in time is a
-refusal.
+An interface: it gets a request (who, to whom, the text) and starts asking
+someone. The answer does not come back through the interface: whoever answers
+calls the service's `approve` or `refuse`, which is also what the command line
+does. So the command line and a configured approver can both answer, the first
+answer wins, and the message leaves the held state once. A yes that arrives at or after the deadline
+is a refusal with the reason `timeout`: the sender may already have been told
+that no answer in time is a refusal.
+
+The config picks the approver in `approver`. The command line is always there,
+beside whatever else is configured.
+
+- **`cli`**, the default. It logs that a message waits, without its text. A
+  person reads it with `agent-gateway approvals` and answers with `approve` or
+  `refuse`.
+- **`command`**. The broker runs a program of the operator's for each held
+  message and takes its answer. This is how a deployment plugs in a phone
+  prompt, a chat bot or a ticket queue without the gateway knowing any of them.
+
+### The command contract
+
+For each message that becomes held the broker starts `argv[0]` with the rest of
+`argv` as its arguments. There is no shell: an argument is never expanded or
+split. The broker writes one JSON object on the program's standard input, closes
+it, and reads its standard output.
+
+```json
+{
+  "id": "6f1c...",
+  "thread": "6f1c...",
+  "hop": 0,
+  "from": { "container": "alpha", "product": "claude", "session": "a1", "title": "Alpha one" },
+  "to": { "container": "beta", "product": "codex", "session": "b1" },
+  "body": "the sender's text, exactly as sent",
+  "rule": "ask-first",
+  "heldAt": 1795000000000,
+  "decideBy": 1795000900000
+}
+```
+
+`rule` is the name of the rule that asked, or null when the default did. The
+times are milliseconds since the epoch. `title` is null when the session has
+none. The container is the one the sender's token proves, the session and the title
+are the sender's claim, and `body` is untrusted: show it
+to a person escaped, as `agent-gateway approvals` does (`escapeForTerminal` in
+`src/broker/approver.ts`), never as markup or as something to run.
+
+The program answers with exactly one JSON value on standard output and exit
+status 0: `{"answer":"approve"}` or `{"answer":"refuse"}`. Everything else is
+**no answer**: a non-zero status, no output, output that is not that object,
+more than 64 KiB of output, a program that cannot start. No answer is never
+taken as a yes. The broker logs that there was none (the reason in a few words,
+never the message text and never what the program printed to standard output)
+and the message stays held, so the command line can still answer it and the
+deadline still refuses it. While the message is held the broker runs the program
+again after 30 seconds, then 60, doubling up to 5 minutes between runs.
+
+What the program prints to standard error goes into the broker's log, one line
+at a time, cleaned of control characters and cut at 500 characters. It must not
+print the message there.
+
+The broker ends the program, SIGTERM first and SIGKILL after 5 seconds, always
+to the PID it started, when
+
+- the message's `decideBy` is reached,
+- the message stops being held (a person answered from the command line, or it
+  was refused or expired), and
+- the broker closes.
+
+The broker does not wait for a program that is no longer asked. An answer that
+comes after any of these is dropped, and one that reaches the service late is
+refused there as before. At most 16 programs run at once; the other messages
+wait for a free place in the order they were held.
+
+The program's environment is `PATH`, `HOME` and `LANG` of the broker's own, the
+variables named in the config's `passEnv`, and `AGENT_GATEWAY_APPROVER_STATE_DIR`
+when the config sets `stateDir`. Nothing else of the broker's environment
+reaches it, so a secret the broker holds stays with the broker. The program
+runs in the broker's working directory.
+
+**A command must be idempotent by `id`.** The broker keeps its questions in
+memory. After a restart a message that is still held is asked about again, and
+the program is run again with the same `id`, even if an earlier run had already
+put a question in front of a person. A message that leaves the held state and
+comes back (a queued message whose rule now says `ask`) is also run again, with
+the same `id` and a new `decideBy`. So the program keeps what it needs, in its
+state directory, to find its earlier question by `id` and ask nothing twice. The
+ready-made command below does that.
+
+### Asking through Elsewire
+
+`agent-gateway approver elsewire` is a command for the contract above. It asks
+a person through an Elsewire server, an MCP server over streamable HTTP with
+bearer authentication, and needs `ELSEWIRE_URL`, `ELSEWIRE_TOKEN_FILE` and
+`ELSEWIRE_STATE_DIR`.
+
+It creates one request with the `review` connector. The person is shown the
+body escaped like a terminal would show it, as the draft, with one reply,
+"Refuse", and approves by sending the draft back as it is. A yes counts only
+when the returned text is the draft, unedited: the gateway never rewrites a
+sender's words, so an edited text is a refusal. A body that is over 4000
+characters once escaped is refused without asking, because a person must be able
+to read all of what they approve.
+
+The id of the Elsewire request is written to a file named after the SHA-256 of
+the message id before the program waits, so a second run for the same message
+waits for the same request. The file is removed after a final answer. A failed
+request or an unreachable server is no answer (exit status 1), and the broker
+tries again. A request that is still open when the message stops being held is
+left to run out on Elsewire's side.
 
 ## What this does not do
 
@@ -233,7 +337,8 @@ tokens.
 src/
   core/      pure: message, states, policy, limits, render
   store/     SQLite: messages, peers, audit
-  broker/    the MCP tools, the adapter channel, the approver interface
+  broker/    the MCP tools, the adapter channel, the approvers (command line, command)
+  approver/  ready-made commands for the command approver
   adapter/   the loop that runs beside an agent
   hook/      the commands a product's hook runs
   drivers/   fake, claude, codex, antigravity

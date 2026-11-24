@@ -8,4 +8,6 @@ asks a person when a rule says so.
 In development: nothing here is ready to run. [docs/design.md](docs/design.md) is
 the design, and `docs/drivers/` is what was measured for each product.
 
+[docs/deploy.md](docs/deploy.md) says how to configure and run the broker and the adapters, in a container or not.
+
 [docs/live.md](docs/live.md) is the first live run, with real Claude Code sessions, and `scripts/live.ts` repeats it.
