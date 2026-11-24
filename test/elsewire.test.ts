@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { MAX_DRAFT_CHARS, draftForMessage, draftOf, mcpTools, nodeState, resultJson, runElsewireApprover, timeoutSeconds, titleOf, urlProblem } from "../src/approver/elsewire.js";
+import { MAX_DRAFT_CHARS, draftForMessage, draftOf, failureDetail, mcpTools, nodeState, resultJson, runElsewireApprover, timeoutSeconds, titleOf, urlProblem } from "../src/approver/elsewire.js";
 import type { Effects, Request, StateIo } from "../src/approver/elsewire.js";
 import type { StopWhy } from "../src/broker/command.js";
 import { render } from "../src/core/render.js";
@@ -91,7 +91,7 @@ describe("asking a person through Elsewire", () => {
         title: "Let this message go? alpha (claude) to beta (codex)",
         draft,
         timeout_sec: 120,
-        replies: ["Refuse"],
+        replies: ["Refuse", "Not now"],
         // No free text can be added to the answer.
         notes: false,
         // Elsewire refuses a request that does not say who asks and how to reach it.
@@ -247,6 +247,42 @@ describe("asking a person through Elsewire", () => {
     }
     expect(bad.err.length).toBeGreaterThan(0);
     expect(fake.requests).toEqual([]);
+  });
+
+  it("says which kind of failure it was, from the tool's error kind, never from its message", async () => {
+    fake.script.push("error-kind");
+    const r = await run(approval({ body: "TOPSECRETBODY" }));
+    expect(r).toMatchObject({ code: 1, out: [] });
+    expect(r.err).toContain("no answer: Error: tool error connector_not_allowed");
+    expect(r.err.join("\n")).not.toContain("TOPSECRETBODY");
+    expect(r.err.join("\n")).not.toContain("not allowed for this token");
+  });
+
+  it("says the HTTP status of a server that does not take the token", async () => {
+    const r = await run(approval(), { token: "wrong-token-0123456789-wrong" });
+    expect(r.err.join("\n")).toMatch(/no answer: \w+: HTTP 401/);
+  });
+
+  it("takes from an error only its name, a status or code of a known shape, and a tool's error kind", async () => {
+    // The fake checks a request as Elsewire does: one quick reply is a failed input check, a tool error that quotes nothing of the request.
+    const tools = mcpTools(fake.url, TOKEN);
+    const sent = { connector: "review", title: "t", requester: { client: "x" }, replies: ["Refuse"] };
+    const error = await tools.call("elsewire_request", sent, 10_000).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+    await tools.close();
+    expect(failureDetail(error)).toBe("Error: tool error input_validation");
+    expect(fake.requests).toEqual([]);
+    // A server that answers an input check with a protocol error carries its numeric code.
+    expect(failureDetail(Object.assign(new Error("a secret"), { code: -32602 }))).toBe("Error: MCP error -32602");
+    expect(() => resultJson({ isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: a secret" }] })).toThrow(expect.objectContaining({ code: -32602 }));
+    expect(failureDetail(Object.assign(new Error("a secret"), { status: 502 }))).toBe("Error: HTTP 502");
+    expect(failureDetail(Object.assign(new Error("a secret"), { code: "ECONNREFUSED" }))).toBe("Error: code ECONNREFUSED");
+    expect(failureDetail(Object.assign(new Error("a secret"), { code: "not a short code, it quotes: a secret" }))).toBe("Error");
+    expect(failureDetail(Object.assign(new Error("a secret"), { kind: "A secret, quoted" }))).toBe("Error");
+    expect(failureDetail(new TypeError("a secret"))).toBe("TypeError");
+    expect(failureDetail("a secret")).toBe("failed");
   });
 
   it("never prints the body or the token on a normal run either", async () => {

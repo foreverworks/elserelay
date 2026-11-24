@@ -7,8 +7,8 @@ import { z } from "zod";
 
 export const TOKEN = "elsewire-token-0123456789";
 
-/** What an `elsewire_await` call gets: an object is its JSON result, "error" a tool-level error, "pending" the usual wait. */
-export type AwaitReply = Record<string, unknown> | "error";
+/** What an `elsewire_await` call gets: an object is its JSON result, "error" a tool-level error, "error-kind" one that carries Elsewire's error kind, "pending" the usual wait. */
+export type AwaitReply = Record<string, unknown> | "error" | "error-kind";
 
 export type FakeElsewire = {
   url: string;
@@ -59,7 +59,8 @@ export async function fakeElsewire(): Promise<FakeElsewire> {
           title: z.string(),
           draft: z.string().optional(),
           timeout_sec: z.number().optional(),
-          replies: z.array(z.string()).optional(),
+          // As the real server checks it: 2 to 4 quick replies of at most 40 characters.
+          replies: z.array(z.string().max(40)).min(2).max(4).optional(),
           requester: z.record(z.string(), z.unknown()),
           notes: z.boolean().optional(),
         },
@@ -78,6 +79,10 @@ export async function fakeElsewire(): Promise<FakeElsewire> {
         if (fake.gate !== null) await fake.gate;
         const next = fake.script.shift() ?? { status: "pending" };
         if (next === "error") return { content: [{ type: "text" as const, text: "boom" }], isError: true as const };
+        if (next === "error-kind") {
+          const error = { kind: "connector_not_allowed", message: "Connector review is not allowed for this token (TOPSECRETBODY)", remedy: "use another connector" };
+          return { ...text({ error }), isError: true as const };
+        }
         return text(next);
       },
     );

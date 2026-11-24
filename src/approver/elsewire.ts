@@ -101,6 +101,30 @@ export type Effects = {
   readonly err: (line: string) => void;
 };
 
+/** What a person is offered to tap instead of typing: Elsewire needs 2 to 4 of them, at most 40 characters each. Each one ends the request denied, a refusal. */
+export const QUICK_REPLIES: readonly string[] = ["Refuse", "Not now"];
+
+/**
+ * Which kind of failure an error was, without anything it says: its name, then the HTTP status of a transport error, the
+ * numeric code of an MCP protocol error, the short code of a local error (a timeout, a refused connection), or the `kind`
+ * Elsewire gave a tool that reported an error. A message is never used, because it could quote what was sent.
+ */
+export function failureDetail(error: unknown): string {
+  if (!(error instanceof Error)) return "failed";
+  const fields = error as Error & { status?: unknown; code?: unknown; kind?: unknown };
+  const detail =
+    typeof fields.status === "number" && Number.isInteger(fields.status)
+      ? `HTTP ${fields.status}`
+      : typeof fields.code === "number" && Number.isInteger(fields.code)
+        ? `MCP error ${fields.code}`
+        : typeof fields.code === "string" && /^[A-Z][A-Z0-9_]{0,39}$/.test(fields.code)
+          ? `code ${fields.code}`
+          : typeof fields.kind === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(fields.kind)
+            ? `tool error ${fields.kind}`
+            : undefined;
+  return detail === undefined ? error.name : `${error.name}: ${detail}`;
+}
+
 const oneLine = (text: string): string => escapeForTerminal(text).replace(/\n/g, " ");
 
 /** The title the person reads: who asks to send to whom, cleaned to one line of at most 200 UTF-16 units, never cut inside a surrogate pair. */
@@ -170,8 +194,8 @@ async function decide(r: Request, tools: Tools, state: StateIo, effects: Effects
     try {
       await tools.call("elsewire_cancel", { id }, 10_000);
     } catch (error) {
-      // The name only: a message of a failed call could quote what was sent.
-      err(`message ${r.id}: the request could not be cancelled (${error instanceof Error ? error.name : "failed"}); it ends by itself at the deadline`);
+      // Never the message of a failed call: it could quote what was sent.
+      err(`message ${r.id}: the request could not be cancelled (${failureDetail(error)}); it ends by itself at the deadline`);
     }
   };
 
@@ -194,7 +218,7 @@ async function decide(r: Request, tools: Tools, state: StateIo, effects: Effects
       await tools.call(
         "elsewire_request",
         // No note: a person could write "don't send" and still send the text. An answer with a note is a refusal below.
-        { connector: "review", title: titleOf(r), draft, timeout_sec: timeoutSeconds(r.decideBy, now()), replies: ["Refuse"], notes: false, requester: requesterOf(r, effects.host) },
+        { connector: "review", title: titleOf(r), draft, timeout_sec: timeoutSeconds(r.decideBy, now()), replies: [...QUICK_REPLIES], notes: false, requester: requesterOf(r, effects.host) },
         30_000,
       ),
     );
@@ -324,12 +348,41 @@ export async function runElsewireApprover(effects: Effects): Promise<number> {
     out(JSON.stringify(verdict.kind === "refuse" && verdict.reason !== undefined ? { answer: "refuse", reason: verdict.reason } : { answer: verdict.kind }));
     return 0;
   } catch (error) {
-    // The name only: a message of a failed call could quote what was sent.
-    err(`no answer: ${error instanceof Error ? error.name : "failed"}`);
+    // Never the message of a failed call: it could quote what was sent.
+    err(`no answer: ${failureDetail(error)}`);
     return 1;
   } finally {
     await tools.close().catch(() => undefined);
   }
+}
+
+/**
+ * What a failed tool result says about the failure, in two safe shapes: the `kind` of the error it carries
+ * (`{"error":{"kind":...}}`, which is Elsewire's own), or the number a server's input check puts in front of its
+ * text (`MCP error -32602: ...`), or that the input check failed. Nothing else of the text is taken.
+ */
+function errorFields(result: { readonly structuredContent?: unknown; readonly content?: readonly unknown[] | undefined }): { readonly kind?: string; readonly code?: number } {
+  const kindOf = (value: unknown): string | undefined => {
+    if (typeof value !== "object" || value === null || !("error" in value)) return undefined;
+    const inner = value.error;
+    return typeof inner === "object" && inner !== null && "kind" in inner && typeof inner.kind === "string" ? inner.kind : undefined;
+  };
+  const fromStructured = kindOf(result.structuredContent);
+  if (fromStructured !== undefined) return { kind: fromStructured };
+  for (const block of result.content ?? []) {
+    if (typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {
+      const numbered = /^MCP error (-?\d{1,6}):/.exec(block.text);
+      if (numbered?.[1] !== undefined) return { code: Number(numbered[1]) };
+      if (block.text.startsWith("Input validation error:")) return { kind: "input_validation" };
+      try {
+        const kind = kindOf(JSON.parse(block.text));
+        return kind === undefined ? {} : { kind };
+      } catch {
+        return {};
+      }
+    }
+  }
+  return {};
 }
 
 /** The text of a tool result: structured content when there is one, else the JSON in its text. */
@@ -338,7 +391,7 @@ export function resultJson(result: {
   readonly content?: readonly unknown[] | undefined;
   readonly structuredContent?: unknown;
 }): unknown {
-  if (result.isError === true) throw new Error("the tool reported an error");
+  if (result.isError === true) throw Object.assign(new Error("the tool reported an error"), errorFields(result));
   if (typeof result.structuredContent === "object" && result.structuredContent !== null) return result.structuredContent;
   for (const block of result.content ?? []) {
     if (typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {

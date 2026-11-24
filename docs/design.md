@@ -340,7 +340,8 @@ text the receiving session will be handed, built by the gateway's own `render`
 from the request (so the sender's claimed session title is in it, in the header,
 above the fence that holds the body), with every control character escaped and
 the whole of it inside a code fence longer than any run of backticks in it, so no
-formatting can hide a part of it. The request has one reply, "Refuse", and
+formatting can hide a part of it. The request has two quick replies, "Refuse" and "Not now" (Elsewire
+requires two to four), both of which end it denied, a refusal, and
 allows no note (`notes: false`), so a person cannot write "don't send" and still
 send. The person approves by sending the draft back as it is. A yes counts only
 when the returned text is the draft, unedited and without a note: the gateway
