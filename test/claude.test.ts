@@ -180,11 +180,30 @@ describe("claude driver: deliver", () => {
     expect(result).toMatchObject({ ok: false, retry: true });
   });
 
-  it("answers an error or a close within the wait with retry true", async () => {
+  it("answers a close within the wait, after the line was written, with retry false and an unknown outcome", async () => {
     await r.listen("53.sock", (s) => s.destroy());
     const id = await r.record(53);
     const result = await createClaudeDriver(r.env).deliver(id, "x");
-    expect(result).toMatchObject({ ok: false, retry: true });
+    expect(result).toMatchObject({ ok: false, retry: false });
+    expect(result.ok ? "" : result.detail).toContain("outcome unknown");
+  });
+
+  it("answers a socket that reads the line and then fails with retry false, but one that never connected with retry true", async () => {
+    const got: string[] = [];
+    await r.listen("56.sock", (s) => {
+      s.once("data", (d: Buffer) => {
+        got.push(d.toString("utf8"));
+        s.destroy(new Error("reset"));
+      });
+    });
+    const id = await r.record(56);
+    const after = await createClaudeDriver(r.env).deliver(id, "x");
+    expect(got).toHaveLength(1);
+    expect(after).toMatchObject({ ok: false, retry: false });
+
+    const none = await r.record(57);
+    const before = await createClaudeDriver({ ...r.env, isSocket: async () => true }).deliver(none, "x");
+    expect(before).toMatchObject({ ok: false, retry: true });
   });
 
   it("refuses another peer protocol, with retry false and a clear detail, without connecting", async () => {

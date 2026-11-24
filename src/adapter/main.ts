@@ -5,6 +5,7 @@
  *   GATEWAY_TOKEN_FILE  a file holding the container's bearer token
  *   GATEWAY_PRODUCT     claude, codex, antigravity, or fake for a try-out
  *   GATEWAY_STATE_DIR   where the delivered ids are kept
+ *   GATEWAY_SESSIONS    optional, comma-separated session ids: the only sessions this adapter reports and delivers to
  *   CODEX_SOCKET        codex only: the app-server's control socket
  *                       (default: $CODEX_HOME/app-server-control/app-server-control.sock)
  *   CODEX_HOME          where that default lives (default: ~/.codex)
@@ -20,6 +21,7 @@ import { createClaudeDriver } from "../drivers/claude.js";
 import { connectUnix, createCodexDriver } from "../drivers/codex.js";
 import { makeFake } from "../drivers/fake.js";
 import type { Driver } from "../drivers/driver.js";
+import { restrictSessions } from "./allowlist.js";
 import { nodeDedupeIo } from "./dedupe.js";
 import { defaultTiming, run } from "./run.js";
 
@@ -30,6 +32,11 @@ const env = z.object({
   GATEWAY_TOKEN_FILE: z.string().min(1),
   GATEWAY_PRODUCT: z.enum(PRODUCTS),
   GATEWAY_STATE_DIR: z.string().min(1),
+  GATEWAY_SESSIONS: z
+    .string()
+    .transform((list) => list.split(",").map((id) => id.trim()).filter((id) => id !== ""))
+    .pipe(z.array(z.string()).min(1, "name at least one session id, or leave it unset"))
+    .optional(),
   CODEX_SOCKET: z.string().min(1).optional(),
   CODEX_HOME: z.string().min(1).optional(),
   ANTIGRAVITY_SUMMARIES_DB: z.string().min(1).optional(),
@@ -40,6 +47,8 @@ export type Config = {
   readonly tokenFile: string;
   readonly product: (typeof PRODUCTS)[number];
   readonly stateDir: string;
+  /** The session ids this adapter may serve, or null for every session its product has. */
+  readonly sessions: readonly string[] | null;
   readonly codexSocket: string;
   readonly antigravityDb: string;
 };
@@ -57,12 +66,18 @@ export function readConfig(source: Readonly<Record<string, string | undefined>>,
     tokenFile: e.GATEWAY_TOKEN_FILE,
     product: e.GATEWAY_PRODUCT,
     stateDir: e.GATEWAY_STATE_DIR,
+    sessions: e.GATEWAY_SESSIONS ?? null,
     codexSocket: e.CODEX_SOCKET ?? join(e.CODEX_HOME ?? join(home, ".codex"), "app-server-control", "app-server-control.sock"),
     antigravityDb: e.ANTIGRAVITY_SUMMARIES_DB ?? defaultSummariesPath(home),
   };
 }
 
 export function driverFor(config: Config, log: (line: string) => void): Driver {
+  const driver = productDriver(config, log);
+  return config.sessions === null ? driver : restrictSessions(driver, config.sessions);
+}
+
+function productDriver(config: Config, log: (line: string) => void): Driver {
   switch (config.product) {
     case "claude":
       return createClaudeDriver();

@@ -21,6 +21,15 @@ describe("readConfig", () => {
     expect(readConfig({ ...BASE, GATEWAY_URL: "not a url", GATEWAY_PRODUCT: "fake" })).toContain("GATEWAY_URL");
   });
 
+  it("reads GATEWAY_SESSIONS as a list of session ids, trimmed, and treats an empty variable as unset", () => {
+    const base = { ...BASE, GATEWAY_PRODUCT: "fake" };
+    expect(ok(base).sessions).toBeNull();
+    expect(ok({ ...base, GATEWAY_SESSIONS: "" }).sessions).toBeNull();
+    expect(ok({ ...base, GATEWAY_SESSIONS: "a1" }).sessions).toEqual(["a1"]);
+    expect(ok({ ...base, GATEWAY_SESSIONS: " a1, b2 ,,c3 " }).sessions).toEqual(["a1", "b2", "c3"]);
+    expect(readConfig({ ...base, GATEWAY_SESSIONS: " , " })).toContain("GATEWAY_SESSIONS");
+  });
+
   it("finds the Codex socket under CODEX_HOME, else under ~/.codex, and CODEX_SOCKET wins", () => {
     const codex = { ...BASE, GATEWAY_PRODUCT: "codex" };
     expect(ok(codex).codexSocket).toBe("/home/u/.codex/app-server-control/app-server-control.sock");
@@ -45,6 +54,14 @@ describe("driverFor", () => {
     }
     expect(driverFor(ok({ ...BASE, GATEWAY_PRODUCT: "antigravity" }), () => undefined).capabilities().push).toBe(false);
     expect(driverFor(ok({ ...BASE, GATEWAY_PRODUCT: "codex" }), () => undefined).capabilities()).toMatchObject({ push: true, wakesIdle: true });
+  });
+
+  it("limits the driver to GATEWAY_SESSIONS when it is set, and leaves it whole when it is not", async () => {
+    const config = ok({ ...BASE, GATEWAY_PRODUCT: "fake", GATEWAY_SESSIONS: "only" });
+    const driver = driverFor(config, () => undefined);
+    // The fake driver has no sessions, so nothing is listed either way; the wrapper shows in how it answers a delivery.
+    expect(await driver.deliver("other", "x")).toMatchObject({ ok: false, retry: false, detail: expect.stringContaining("does not serve") });
+    expect(await driverFor(ok({ ...BASE, GATEWAY_PRODUCT: "fake" }), () => undefined).deliver("other", "x")).toMatchObject({ detail: "no such session" });
   });
 
   it("makes a Codex driver whose list throws, rather than an empty list, when the socket is not there", async () => {

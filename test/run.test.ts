@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { emptyDedupe, loadDedupe, nodeDedupeIo, remember } from "../src/adapter/dedupe.js";
+import { restrictSessions } from "../src/adapter/allowlist.js";
 import { run } from "../src/adapter/run.js";
 import type { RunDeps, RunEnd, Timing } from "../src/adapter/run.js";
 import { emptyFake, makeFake } from "../src/drivers/fake.js";
@@ -226,6 +227,22 @@ describe("run", () => {
     expect(fake.read().delivered).toEqual([{ session: "s1", text: "hello" }]);
     const saved = await loadDedupe(nodeDedupeIo, s.path);
     expect(saved.entries.map((e) => e.id)).toEqual(["m1"]);
+    await s.stop();
+  });
+
+  it("with a session list, reports only those sessions and refuses a delivery to another for good, whatever the broker sends", async () => {
+    const b = await broker();
+    const fake = makeFake({ ...emptyFake, sessions: [s1, s2] });
+    const s = await start(b, fake, { driver: restrictSessions(fake.driver, ["s1"]) });
+    await until(() => b.reports.length > 0, "report");
+    expect(b.reports[0]?.sessions).toEqual([s1]);
+    b.send(deliver("m1", "s2", "for the other one"));
+    await until(() => b.outcomes.length === 1, "outcome");
+    expect(b.outcomes[0]).toMatchObject({ id: "m1", result: { ok: false, retry: false } });
+    expect(fake.read().delivered).toEqual([]);
+    b.send(deliver("m2", "s1", "for the listed one"));
+    await until(() => b.outcomes.length === 2, "second outcome");
+    expect(b.outcomes[1]?.result).toMatchObject({ ok: true });
     await s.stop();
   });
 

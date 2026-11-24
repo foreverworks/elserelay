@@ -30,9 +30,10 @@ const record = z.object({
 });
 type SessionRecord = z.infer<typeof record>;
 
+/** `retry` is false once the line may have reached the session: a second copy could be read as a second message. */
 export type SendResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly detail: string };
+  | { readonly ok: false; readonly retry: boolean; readonly detail: string };
 
 export type ClaudeEnv = {
   readonly dir: string;
@@ -41,7 +42,7 @@ export type ClaudeEnv = {
   readonly readFile: (path: string) => Promise<string>;
   readonly pidAlive: (pid: number) => boolean;
   readonly isSocket: (path: string) => Promise<boolean>;
-  /** Writes the line and reports `ok` when nothing went wrong for `ACCEPT_WAIT_MS`. */
+  /** Writes the line and reports `ok` when nothing went wrong for `ACCEPT_WAIT_MS`. A failure before the write is `retry: true`, one after it is not. */
   readonly send: (socketPath: string, line: string) => Promise<SendResult>;
 };
 
@@ -51,26 +52,31 @@ export function sendLine(socketPath: string, line: string, waitMs: number = ACCE
   return new Promise((resolve) => {
     const socket = connect(socketPath);
     let timer: NodeJS.Timeout | undefined;
+    // Set when the line is handed to the socket: from then on the session may have it, whatever happens next.
+    let written = false;
+    const failed = (what: string): SendResult =>
+      written ? { ok: false, retry: false, detail: `outcome unknown, the line may have reached the session: ${what}` } : { ok: false, retry: true, detail: what };
     const end = (result: SendResult): void => {
       clearTimeout(timer);
       socket.destroy();
       resolve(result);
     };
-    const limit = setTimeout(() => end({ ok: false, detail: "the socket did not accept a connection" }), CONNECT_LIMIT_MS);
+    const limit = setTimeout(() => end(failed("the socket did not accept a connection")), CONNECT_LIMIT_MS);
     socket.once("connect", () => {
       clearTimeout(limit);
+      written = true;
       socket.write(line, (error) => {
-        if (error) end({ ok: false, detail: `write failed: ${error.message}` });
+        if (error) end(failed(`write failed: ${error.message}`));
         else timer = setTimeout(() => end({ ok: true }), waitMs);
       });
     });
     socket.once("error", (error) => {
       clearTimeout(limit);
-      end({ ok: false, detail: `socket error: ${error.message}` });
+      end(failed(`socket error: ${error.message}`));
     });
     socket.once("close", () => {
       clearTimeout(limit);
-      end({ ok: false, detail: "the session closed the socket" });
+      end(failed("the session closed the socket"));
     });
   });
 }
@@ -160,7 +166,7 @@ export function createClaudeDriver(env: ClaudeEnv = nodeClaudeEnv()): Driver {
       }
       const line = `${JSON.stringify({ type: "user", message: { role: "user", content: text }, from: FROM })}\n`;
       const sent = await env.send(r.messagingSocketPath, line);
-      return sent.ok ? { ok: true, certainty: "accepted" } : { ok: false, retry: true, detail: sent.detail };
+      return sent.ok ? { ok: true, certainty: "accepted" } : { ok: false, retry: sent.retry, detail: sent.detail };
     },
   };
 }

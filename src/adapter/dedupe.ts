@@ -4,7 +4,7 @@
  * after a restart. Only a hand-over is remembered: a failed try must be tried again.
  */
 import { dirname } from "node:path";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { z } from "zod";
 import type { Delivered } from "../drivers/driver.js";
 
@@ -60,6 +60,69 @@ export type DedupeIo = {
   readonly write: (path: string, text: string) => Promise<void>;
 };
 
+/** The file operations a durable write is made of, so a test can see the order they run in. */
+export type DedupeFs = {
+  readonly mkdir: (dir: string) => Promise<void>;
+  /** Creates the file, writes it and flushes it to disk before it resolves. */
+  readonly writeSynced: (path: string, text: string) => Promise<void>;
+  readonly rename: (from: string, to: string) => Promise<void>;
+  /** Flushes the directory entry, so a rename survives a power cut. */
+  readonly syncDir: (dir: string) => Promise<void>;
+};
+
+/** The few calls of `node:fs/promises` the durable write is built on. */
+export type FsOps = {
+  readonly mkdir: (dir: string) => Promise<void>;
+  readonly open: (path: string, flags: "w" | "r", mode?: number) => Promise<OpenFile>;
+  readonly rename: (from: string, to: string) => Promise<void>;
+};
+export type OpenFile = {
+  readonly writeFile: (text: string) => Promise<void>;
+  readonly sync: () => Promise<void>;
+  readonly close: () => Promise<void>;
+};
+
+export const nodeFsOps: FsOps = {
+  mkdir: async (dir) => {
+    await mkdir(dir, { recursive: true });
+  },
+  open: (path, flags, mode) => open(path, flags, mode),
+  rename,
+};
+
+export function dedupeFsOver(ops: FsOps): DedupeFs {
+  const flushed = async (path: string, flags: "w" | "r", write: ((file: OpenFile) => Promise<void>) | null): Promise<void> => {
+    const file = await ops.open(path, flags, flags === "w" ? 0o600 : undefined);
+    try {
+      if (write !== null) await write(file);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+  };
+  return {
+    mkdir: ops.mkdir,
+    writeSynced: (path, text) => flushed(path, "w", (file) => file.writeFile(text)),
+    rename: ops.rename,
+    syncDir: (dir) => flushed(dir, "r", null),
+  };
+}
+
+export const nodeDedupeFs: DedupeFs = dedupeFsOver(nodeFsOps);
+
+/**
+ * Written beside the file and renamed, so a crash leaves the old one whole. The write only counts as done once the file and then
+ * the directory are on disk: the adapter answers the broker after it, and an id that was lost with a power cut would be handed over twice.
+ */
+export async function writeDurably(fs: DedupeFs, path: string, text: string): Promise<void> {
+  const dir = dirname(path);
+  await fs.mkdir(dir);
+  const tmp = `${path}.tmp`;
+  await fs.writeSynced(tmp, text);
+  await fs.rename(tmp, path);
+  await fs.syncDir(dir);
+}
+
 export const nodeDedupeIo: DedupeIo = {
   read: async (path) => {
     try {
@@ -69,13 +132,7 @@ export const nodeDedupeIo: DedupeIo = {
       throw e;
     }
   },
-  // Written beside the file and renamed, so a crash leaves the old one whole.
-  write: async (path, text) => {
-    await mkdir(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
-    await writeFile(tmp, text, { mode: 0o600 });
-    await rename(tmp, path);
-  },
+  write: (path, text) => writeDurably(nodeDedupeFs, path, text),
 };
 
 export async function loadDedupe(io: DedupeIo, path: string, limit: number = DEFAULT_LIMIT): Promise<DedupeState> {
