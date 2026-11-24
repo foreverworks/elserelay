@@ -353,8 +353,13 @@ async function main(options: Options): Promise<number> {
       const aTurns = a.turns.length;
       const replies = itemsOf(first, threadId, "mcpToolCall").filter((i) => i["tool"] === "reply").length;
       a.prompt('Task: use list_peers to find the session of container codex-b and send it the question "what is 23 plus 19? Answer me with your reply tool." with the send tool, then stop and wait. When its answer arrives as a new turn, tell me the answer in one short sentence.');
-      await waitA(aTurns + 2);
       await waitCodex(t0 + 1);
+      // A message left over from scenario 1 may wake A too, so the answer is what is waited for and not a number of turns.
+      await until("A to say the answer", 120_000, () => {
+        bill();
+        checkBudget();
+        return a.turns.slice(aTurns).some((t) => /42/.test(t.text));
+      });
       const rows = await audit();
       const ac = idsBetween(rows, "claude-a", "codex-b");
       const ca = idsBetween(rows, "codex-b", "claude-a");
@@ -471,11 +476,15 @@ async function main(options: Options): Promise<number> {
       const shown = (await cli(["approvals"])).includes(id2);
       await cli(["refuse", id2]);
       const s2 = await stateOf(id2);
-      const rows = await audit();
-      const approved = [...new Set(rows.filter((r) => r.from.startsWith("probe-ask/") && r.event !== "state").map((r) => r.id))].filter((id) => finalState(rows, id) === "delivered").length;
+      const t0 = codexTurns();
+      const third = await send(probeAsk, "codex-b", threadId, "A last word from a peer. Answer your user with the single word seen.", "probe-1");
+      const id3 = await heldId(third);
+      await cli(["approve", id3]);
+      await until("the approved message to be delivered", 60_000, async () => (await stateOf(id3)) === "delivered");
+      await waitCodex(t0 + 1);
       return {
-        ok: denied.isError && /no policy rule lets you message that session/.test(denied.text) && same && shown && s2 === "refused" && approved >= 2,
-        evidence: `the deny sender saw: "${oneLine(denied.text)}"; an unknown container gives the same words: ${same}; an ask message was held and listed by approvals: ${shown}, then refused: ${s2}; ask messages approved by the command line and delivered before this point (scenarios 3 and 4): ${approved}`,
+        ok: denied.isError && /no policy rule lets you message that session/.test(denied.text) && same && shown && s2 === "refused",
+        evidence: `the deny sender saw: "${oneLine(denied.text)}"; an unknown container gives the same words: ${same}; an ask message was held and listed by approvals: ${shown}, then refused: ${s2}; another was approved, delivered and started a turn that completed`,
       };
     });
 
