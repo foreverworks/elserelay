@@ -232,7 +232,7 @@ export function makeService(deps: Deps): Service {
   }
 
   // A message a session pulled does not block the push path: it ends by its own acknowledgement or by expiry.
-  const hasDelivering = (to: Address): boolean => store.inbox(to, false).some((t) => t.state === "delivering" && !t.pulled);
+  const hasDelivering = (to: Address): boolean => store.inbox(to).some((t) => t.state === "delivering" && !t.pulled);
 
   /** Writes only if the message is still as `t` showed it: the push path and the clock must not undo a newer answer. */
   function refuseOrRetry(t: Tracked, reason: Reason, at: number): void {
@@ -317,11 +317,10 @@ export function makeService(deps: Deps): Service {
       acknowledge(to, received, at);
       if (store.stopped()) return { kind: "ok", messages: [] };
       const pulled: Pulled[] = [];
-      for (const t of store.inbox(to, true)) {
-        // Not a message whose push ended with no outcome: the adapter may have handed it over, and only the push path retries it with its id.
-        const fresh = t.state === "queued" && t.reason?.kind !== "no-outcome";
-        const again = t.state === "delivering" && t.pulled && t.updatedAt + deps.deliveryTimeoutMs <= at;
-        if (!fresh && !again) continue;
+      // The store returns only what can be handed out: queued messages (not one whose push ended with no outcome, which only the push path
+      // retries) and pulled ones not confirmed within the delivery timeout.
+      for (const t of store.pullable(to, at - deps.deliveryTimeoutMs)) {
+        const again = t.state === "delivering";
         if (pulled.length >= MAX_INBOX_MESSAGES) break;
         if (!screen(t, at).go) continue;
         // The first pull is not a return. A message that keeps coming back unconfirmed is settled instead of returned for ever.

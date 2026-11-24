@@ -3,8 +3,9 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { SQLInputValue } from "node:sqlite";
 import type { Peer } from "../src/core/types.js";
-import { openStore } from "../src/store/sqlite.js";
+import { openStore, SQL } from "../src/store/sqlite.js";
 import type { Store } from "../src/store/types.js";
 import { addr, events, message } from "./fixtures.js";
 
@@ -256,27 +257,67 @@ describe("inbox and markRead", () => {
     store.apply("f", events.queue, 2);
     store.apply("f", { kind: "hand-out", attempt: 1 }, 3);
     store.apply("f", events.deliver, 4);
-    expect(store.inbox(addr("beta"), false).map((t) => t.message.id)).toEqual(["a", "d", "f"]);
-    expect(store.inbox(addr("beta", "other"), false).map((t) => t.message.id)).toEqual(["e"]);
-    expect(store.inbox(addr("beta", "s1", "codex"), false)).toEqual([]);
+    expect(store.inbox(addr("beta")).map((t) => t.message.id)).toEqual(["a", "d", "f"]);
+    expect(store.inbox(addr("beta", "other")).map((t) => t.message.id)).toEqual(["e"]);
+    expect(store.inbox(addr("beta", "s1", "codex"))).toEqual([]);
   });
 
-  it("unreadOnly leaves out what markRead has seen; marking twice or an unknown id is harmless", () => {
+  it("pullable leaves out what markRead has seen; marking twice or an unknown id is harmless", () => {
     for (const id of ["a", "b"]) {
       store.receive(message(id), 1);
       store.apply(id, events.queue, 2);
     }
     store.markRead(addr("beta"), ["a", "nope"], 5);
     store.markRead(addr("beta"), ["a"], 6);
-    expect(store.inbox(addr("beta"), true).map((t) => t.message.id)).toEqual(["b"]);
-    expect(store.inbox(addr("beta"), false).map((t) => t.message.id)).toEqual(["a", "b"]);
+    expect(store.pullable(addr("beta"), 1000).map((t) => t.message.id)).toEqual(["b"]);
+    expect(store.inbox(addr("beta")).map((t) => t.message.id)).toEqual(["a", "b"]);
   });
 
   it("a session cannot mark another session's message read", () => {
     store.receive(message("a"), 1);
     store.apply("a", events.queue, 2);
     store.markRead(addr("beta", "intruder"), ["a"], 5);
-    expect(store.inbox(addr("beta"), true)).toHaveLength(1);
+    expect(store.pullable(addr("beta"), 1000)).toHaveLength(1);
+  });
+});
+
+describe("pullable", () => {
+  const ids = (pulledBefore: number): string[] => store.pullable(addr("beta"), pulledBefore).map((t) => t.message.id);
+
+  it("returns what inbox can hand out: queued messages, and pulled ones not confirmed since the time", () => {
+    for (const id of ["queued", "failed", "lost", "pushed", "pulled", "settled", "held", "refused", "expired"]) store.receive(message(id, { createdAt: id.length }), 1);
+    store.apply("queued", events.queue, 2);
+    handOut("failed");
+    store.apply("failed", events.retry, 12);
+    handOut("lost");
+    store.apply("lost", { kind: "retry", reason: { kind: "no-outcome", ms: 1000 } }, 12);
+    handOut("pushed");
+    store.apply("pulled", events.queue, 2);
+    store.apply("pulled", events.pull, 20);
+    handOut("settled");
+    store.apply("settled", events.deliver, 14);
+    store.apply("held", events.hold, 2);
+    store.apply("refused", events.refuse, 2);
+    store.apply("expired", events.queue, 2);
+    store.apply("expired", events.expire, 3);
+    // A failed push may be pulled, one that ended with no outcome may not, and a message that is out with the adapter is not the pull path's.
+    expect(ids(19)).toEqual(["queued", "failed"]);
+    expect(ids(20)).toEqual(["queued", "failed", "pulled"]);
+    expect(ids(1000)).toEqual(["queued", "failed", "pulled"]);
+    store.markRead(addr("beta"), ["pulled"], 21);
+    expect(ids(1000)).toEqual(["queued", "failed"]);
+  });
+
+  it("reads none of 1000 settled messages", () => {
+    for (let i = 0; i < 1000; i++) {
+      store.receive(message(`done${i}`, { createdAt: i }), 1);
+      handOut(`done${i}`);
+      store.apply(`done${i}`, events.deliver, 14);
+    }
+    store.receive(message("fresh", { createdAt: 5000 }), 1);
+    store.apply("fresh", events.queue, 2);
+    expect(store.pullable(addr("beta"), 1000).map((t) => t.message.id)).toEqual(["fresh"]);
+    expect(store.inbox(addr("beta"))).toHaveLength(1001);
   });
 });
 
@@ -387,7 +428,7 @@ describe("a store file", () => {
 
     const raw = new DatabaseSync(path);
     expect(raw.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-    expect(raw.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
+    expect(raw.prepare("PRAGMA user_version").get()).toEqual({ user_version: 4 });
     raw.close();
   });
 
@@ -422,12 +463,16 @@ describe("a store file", () => {
     raw.close();
   });
 
-  /** A file as an older build left it: the version 3 additions removed again, whatever the rows hold. */
-  function downgrade(path: string, version: 1 | 2): void {
+  /** A file as an older build left it: the later additions removed again, whatever the rows hold. */
+  function downgrade(path: string, version: 1 | 2 | 3): void {
     const raw = new DatabaseSync(path);
-    raw.exec("DROP TABLE refusal_notices");
-    raw.exec("DROP INDEX messages_by_sender");
-    for (const column of ["body_chars", "body_sha256", "pulled"]) raw.exec(`ALTER TABLE messages DROP COLUMN ${column}`);
+    for (const index of ["audit_by_message", "messages_by_first_handed", "messages_pullable"]) raw.exec(`DROP INDEX ${index}`);
+    raw.exec("ALTER TABLE messages DROP COLUMN first_handed_at");
+    if (version < 3) {
+      raw.exec("DROP TABLE refusal_notices");
+      raw.exec("DROP INDEX messages_by_sender");
+      for (const column of ["body_chars", "body_sha256", "pulled"]) raw.exec(`ALTER TABLE messages DROP COLUMN ${column}`);
+    }
     if (version === 1) raw.exec("DROP TABLE control_log");
     raw.exec(`PRAGMA user_version = ${version}`);
     raw.close();
@@ -473,8 +518,58 @@ describe("a store file", () => {
     expect(second.noteRefusalLimit("alpha", 1, 60, 1000)).toBe(true);
     second.close();
     const again = new DatabaseSync(path);
-    expect(again.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
+    expect(again.prepare("PRAGMA user_version").get()).toEqual({ user_version: 4 });
     again.close();
+  });
+
+  it("opens a version 3 file: indexes the audit and finds when each message was first handed out", () => {
+    const path = join(dir, "v3.sqlite");
+    const first = openStore(path);
+    for (const id of ["pushed", "pulled", "waiting"]) first.receive(message(id), 1);
+    for (const id of ["pushed", "pulled", "waiting"]) first.apply(id, events.queue, 2);
+    first.apply("pushed", { kind: "hand-out", attempt: 1 }, 3);
+    first.apply("pushed", events.retry, 4);
+    first.apply("pushed", { kind: "hand-out", attempt: 2 }, 8);
+    first.apply("pulled", events.pull, 20);
+    first.apply("pulled", events.pull, 30);
+    first.close();
+    downgrade(path, 3);
+
+    const second = openStore(path);
+    expect(second.pullsOf("pulled")).toBe(2);
+    // The newest first hand-out is the pull at 20 (not its later pull at 30, nor the second hand-out at 8); nothing was handed out for "waiting".
+    expect(second.lastReceived(addr("beta"), "alpha", 0)?.message.id).toBe("pulled");
+    expect(second.lastReceived(addr("beta"), "alpha", 20)?.message.id).toBe("pulled");
+    expect(second.lastReceived(addr("beta"), "alpha", 21)).toBeNull();
+    expect(second.pullable(addr("beta"), 1000).map((t) => t.message.id)).toEqual(["pulled", "waiting"]);
+    second.close();
+    const again = new DatabaseSync(path);
+    expect(again.prepare("PRAGMA user_version").get()).toEqual({ user_version: 4 });
+    expect(again.prepare("SELECT first_handed_at AS at FROM messages WHERE id = 'pushed'").get()).toEqual({ at: 3 });
+    again.close();
+    expect(() => openStore(path).close()).not.toThrow();
+  });
+
+  /** What SQLite says it will do for a query: its plan, as one text. */
+  function plan(path: string, sql: string, ...params: SQLInputValue[]): string {
+    const raw = new DatabaseSync(path);
+    const rows = raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params);
+    raw.close();
+    return rows.map((row) => String(row.detail)).join("\n");
+  }
+
+  it("counts pulls, finds the last hand-out and lists what inbox can hand out through an index, never a scan of the table", () => {
+    const path = join(dir, "gw.sqlite");
+    openStore(path).close();
+    const pulls = plan(path, SQL.pulls, "m1");
+    expect(pulls).toContain("audit_by_message");
+    expect(pulls).not.toMatch(/SCAN audit/);
+    const last = plan(path, SQL.lastReceived, "beta", "fake", "s1", "alpha", 0);
+    expect(last).toContain("messages_by_first_handed");
+    expect(last).not.toMatch(/SCAN messages/);
+    const pullable = plan(path, SQL.pullable, "beta", "fake", "s1", 0);
+    expect(pullable).toContain("messages_pullable");
+    expect(pullable).not.toMatch(/SCAN m\b/);
   });
 
   it("the refusal notices refuse UPDATE and DELETE like the control log", () => {

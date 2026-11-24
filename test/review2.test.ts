@@ -116,3 +116,130 @@ describe("5. inbox returns a bounded number of messages", () => {
     expect(pulled(r, first)).toEqual(ids.slice(MAX_INBOX_MESSAGES));
   });
 });
+
+const DENY_ALL = { rules: [{ name: "closed", from: {}, to: {}, decision: "deny" }] };
+
+describe("6. the hop window counts from the first hand-out", () => {
+  const WIDE = { ...ALLOW_ALL, limits: { rate: { messages: 1000 } } };
+  /** The hop the next `send` from b2 to alpha starts at. */
+  const hopOfSend = (r: Rig): number => {
+    const sent = r.service.send("beta", beta("b2"), to("a1", "alpha"), "a new topic");
+    return r.store.get(accepted(sent))?.message.hop ?? -1;
+  };
+
+  it("a re-pull does not extend the window", () => {
+    const r = make(WIDE, 400_000);
+    const id = accepted(r.service.send("alpha", alpha, to("b2"), "one"));
+    expect(pulled(r)).toEqual([id]);
+    r.clock.t += 400_000;
+    expect(pulled(r)).toEqual([id]);
+    expect(r.store.get(id)).toMatchObject({ updatedAt: r.clock.t });
+    // 700 s after the first hand-out, 300 s after the re-pull: inside the window by the last change, outside it by the first hand-out.
+    r.clock.t += 300_000;
+    expect(hopOfSend(r)).toBe(0);
+  });
+
+  it("an acknowledgement or a settle long after the first hand-out does not open a new window", () => {
+    const r = make(WIDE);
+    const confirmed = accepted(r.service.send("alpha", alpha, to("b2"), "one"));
+    expect(pulled(r)).toEqual([confirmed]);
+    r.clock.t += HOP_MEMORY_MS + 1;
+    expect(pulled(r, [confirmed])).toEqual([]);
+    expect(r.store.get(confirmed)).toMatchObject({ state: "delivered", certainty: "confirmed" });
+    expect(hopOfSend(r)).toBe(0);
+
+    const settled = accepted(r.service.send("alpha", alpha, to("b2"), "two"));
+    expect(pulled(r)).toEqual([settled]);
+    r.clock.t += HOP_MEMORY_MS + 1;
+    for (let i = 0; i < MAX_RETURNS; i++) {
+      expect(pulled(r)).toEqual([settled]);
+      r.clock.t += 1000;
+    }
+    expect(pulled(r)).toEqual([]);
+    expect(r.store.get(settled)).toMatchObject({ state: "delivered", certainty: "accepted" });
+    expect(hopOfSend(r)).toBe(0);
+  });
+
+  it("still continues the count inside the window, whatever became of the message since", () => {
+    const r = make(WIDE);
+    const id = accepted(r.service.send("alpha", alpha, to("b2"), "one"));
+    pulled(r);
+    r.clock.t += HOP_MEMORY_MS - 1000;
+    pulled(r, [id]);
+    expect(hopOfSend(r)).toBe(1);
+  });
+});
+
+describe("7. settling beside the other limits of inbox", () => {
+  const WIDE = { ...ALLOW_ALL, limits: { rate: { messages: 1000 } } };
+  const pullsOf = (r: Rig, id: string): number => r.store.pullsOf(id);
+
+  it("settling does not use up the cap: a call that settles 50 messages still hands out the next ones", () => {
+    const r = make(WIDE);
+    const ids = Array.from({ length: MAX_INBOX_MESSAGES + 10 }, (_, i) => accepted(r.service.send("alpha", alpha, to("b2"), `m${i}`)));
+    const older = ids.slice(0, MAX_INBOX_MESSAGES);
+    const newer = ids.slice(MAX_INBOX_MESSAGES);
+    expect(pulled(r)).toEqual(older);
+    expect(pulled(r)).toEqual(newer);
+    // Everything is overdue from here on; the 50 oldest come first every time, so the 10 behind them wait.
+    for (let i = 0; i < MAX_RETURNS; i++) {
+      r.clock.t += 1000;
+      expect(pulled(r)).toEqual(older);
+    }
+    expect(older.map((id) => pullsOf(r, id))).toEqual(older.map(() => MAX_RETURNS + 1));
+    expect(newer.map((id) => pullsOf(r, id))).toEqual(newer.map(() => 1));
+    r.clock.t += 1000;
+    expect(pulled(r)).toEqual(newer);
+    expect(older.map((id) => r.store.get(id)?.state)).toEqual(older.map(() => "delivered"));
+    expect(older.map((id) => r.store.get(id)?.certainty)).toEqual(older.map(() => "accepted"));
+    expect(newer.map((id) => pullsOf(r, id))).toEqual(newer.map(() => 2));
+  });
+
+  it("settles more than 50 at once, whatever the cap, and hands out what is behind them", () => {
+    const r = make(WIDE);
+    const overdue = Array.from({ length: MAX_INBOX_MESSAGES + 10 }, (_, i) => accepted(r.service.send("alpha", alpha, to("b2"), `m${i}`)));
+    expect(pulled(r).length).toBe(MAX_INBOX_MESSAGES);
+    expect(pulled(r).length).toBe(10);
+    const fresh = Array.from({ length: 3 }, (_, i) => accepted(r.service.send("alpha", alpha, to("b2"), `new${i}`)));
+    // The first 55 have been returned as often as the rule allows (the extra pulls stand for earlier calls), the last 5 once.
+    const atThreshold = overdue.slice(0, MAX_INBOX_MESSAGES + 5);
+    const behind = overdue.slice(MAX_INBOX_MESSAGES + 5);
+    for (const id of atThreshold) {
+      for (let i = 0; i < MAX_RETURNS; i++) r.store.apply(id, { kind: "pull" }, r.clock.t);
+    }
+    r.clock.t += 1000;
+    expect(pulled(r)).toEqual([...behind, ...fresh]);
+    expect(atThreshold.map((id) => r.store.get(id))).toEqual(atThreshold.map(() => expect.objectContaining({ state: "delivered", certainty: "accepted" })));
+    expect(behind.map((id) => pullsOf(r, id))).toEqual(behind.map(() => 2));
+  });
+
+  it("settles nothing while the gateway is stopped, and a confirmation still counts", () => {
+    const r = make();
+    const settled = accepted(r.service.send("alpha", alpha, to("b2"), "one"));
+    const confirmed = accepted(r.service.send("alpha", alpha, to("b2"), "two"));
+    pulled(r);
+    for (let i = 0; i < MAX_RETURNS; i++) r.store.apply(settled, { kind: "pull" }, r.clock.t);
+    r.clock.t += 1000;
+    r.store.setStopped(true, r.clock.t);
+    const entries = r.store.audit(0).length;
+    // Stopped, `inbox` hands out and settles nothing; it does take the session's confirmation, which is the session's word, not a delivery.
+    expect(pulled(r, [confirmed])).toEqual([]);
+    expect(r.store.get(confirmed)).toMatchObject({ state: "delivered", certainty: "confirmed" });
+    expect(r.store.get(settled)).toMatchObject({ state: "delivering", pulled: true });
+    expect(r.store.audit(0).length).toBe(entries + 1);
+    r.store.setStopped(false, r.clock.t);
+    expect(pulled(r)).toEqual([]);
+    expect(r.store.get(settled)).toMatchObject({ state: "delivered", certainty: "accepted" });
+  });
+
+  it("refuses a message at the threshold whose policy has become deny, instead of settling it as delivered", () => {
+    const r = make();
+    const id = accepted(r.service.send("alpha", alpha, to("b2"), "secret words"));
+    pulled(r);
+    for (let i = 0; i < MAX_RETURNS; i++) r.store.apply(id, { kind: "pull" }, r.clock.t);
+    r.clock.t += 1000;
+    expect(r.withPolicy(policyOf(DENY_ALL)).inbox("beta", "b2")).toEqual({ kind: "ok", messages: [] });
+    expect(r.store.get(id)).toMatchObject({ state: "refused", reason: { kind: "policy", rule: "closed" }, certainty: null });
+    expect(r.store.get(id)?.message.body).toBe("");
+  });
+});

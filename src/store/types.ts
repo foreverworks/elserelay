@@ -26,15 +26,24 @@ export type Store = {
   readonly held: () => readonly Tracked[];
   /** Messages past their expiry that are not final. */
   readonly expired: (at: number) => readonly Tracked[];
-  /** What is addressed to a session, newest last; `unreadOnly` leaves out what `markRead` has seen. */
-  readonly inbox: (to: Address, unreadOnly: boolean) => readonly Tracked[];
+  /** Everything addressed to a session that was put in front of it (queued, delivering or delivered), oldest first. */
+  readonly inbox: (to: Address) => readonly Tracked[];
+  /**
+   * What `inbox` can still hand out to a session, oldest first, and nothing else: queued messages (not one whose last push ended with no
+   * outcome, which only the push path retries) and pulled ones whose last pull was at or before `pulledBefore`, none that `markRead` has seen.
+   * Settled messages are never read, however many there are.
+   */
+  readonly pullable: (to: Address, pulledBefore: number) => readonly Tracked[];
   readonly markRead: (to: Address, ids: readonly string[], at: number) => void;
   readonly thread: (thread: string) => readonly Tracked[];
   /** Messages from one container to another received since `since`, refused ones left out. */
   readonly sentSince: (from: string, to: string, since: number) => number;
   /** Messages from one container refused since `since`. */
   readonly refusedSince: (from: string, since: number) => number;
-  /** The newest message the addressee was handed (delivering or delivered) from a container since `since`, or null. */
+  /**
+   * The message from a container that was first handed to the addressee (first hand-out or pull, whatever became of it since) most recently,
+   * counting only those first handed since `since`; null when there is none. Later pulls, acknowledgements and settling do not move that time.
+   */
   readonly lastReceived: (to: Address, from: string, since: number) => Tracked | null;
   /**
    * Writes the line saying that a container's refusals are no longer recorded, unless one was written for it within

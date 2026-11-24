@@ -132,7 +132,10 @@ A message leaves in one of two ways, and `delivering` covers both.
   not given the same message every minute for a day; its expiry ends it
   otherwise. One `inbox` call hands out at most 50 messages, oldest first, and
   the answer says when more may be waiting; the rest come with the next call,
-  and a confirmation takes at most 100 ids. The push path never retries a pulled message and is not held
+  and a confirmation takes at most 100 ids. Because the order is oldest first,
+  overdue unconfirmed messages come before newer ones, so 50 of them can delay
+  newer messages until they are confirmed or settled; settling a message does
+  not count toward the 50. The push path never retries a pulled message and is not held
   up by one.
 
 `inbox` does not hand out a message whose last push ended with no outcome: the
@@ -165,11 +168,15 @@ cold makes it read its whole context again.
   They stop agents that loop by themselves, so they also count through `send`: a
   `send` from a session that was handed a message by the target container within
   the last 10 minutes starts at that message's hop plus one, in a new thread, and
-  is refused past the limit like a reply. The refusal says that the session was
-  answering a recent message from that container, that the count is not one of
-  its own threads, and how long to wait before a new topic. The session is a
-  claim, so an agent in a compromised container can start from zero by naming
-  another one; the pair rate below is the bound it cannot pass.
+  is refused past the limit like a reply. The 10 minutes count from the first
+  time the message was handed to the session (its first hand-out or pull), not
+  from a later pull, acknowledgement or settling, so none of those opens a new
+  window. A pair that loops through `send` more slowly than that window is not
+  counted by hops at all and is bounded by the pair rate alone. The refusal says
+  that the session was answering a recent message from that container, that the
+  count is not one of its own threads, and how long to wait before a new topic.
+  The session is a claim, so an agent in a compromised container can start from
+  zero by naming another one; the pair rate below is the bound it cannot pass.
 - **Rate:** messages per pair of containers in a sliding window.
 - **Refusals:** refused messages per sender container in a sliding window
   (`limits.refusals`, 60 an hour by default). Past it a refusal is not stored at

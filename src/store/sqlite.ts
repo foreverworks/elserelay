@@ -7,7 +7,7 @@ import { PRODUCTS, STATES } from "../core/types.js";
 import type { AuditEntry, ControlEntry, Event, Message, Peer, Reason, Tracked } from "../core/types.js";
 import type { Store } from "./types.js";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 CREATE TABLE messages (
@@ -114,6 +114,17 @@ CREATE TRIGGER refusal_notices_never_updated BEFORE UPDATE ON refusal_notices
 BEGIN SELECT RAISE(ABORT, 'control log entries are never changed'); END;
 CREATE TRIGGER refusal_notices_never_deleted BEFORE DELETE ON refusal_notices
 BEGIN SELECT RAISE(ABORT, 'control log entries are never removed'); END;
+`;
+
+// Added in version 4. The audit is append-only and grows for ever, so the counts and lookups by message get an index. `first_handed_at` is when the
+// message first went to its session (its first hand-out or pull), which anchors the hop window of a `send`; a partial index covers what `inbox`
+// can still hand out, so the settled messages of a session cost nothing.
+const INBOX_COST = `
+CREATE INDEX audit_by_message ON audit (message, event, at);
+ALTER TABLE messages ADD COLUMN first_handed_at INTEGER;
+UPDATE messages SET first_handed_at = (SELECT MIN(a.at) FROM audit a WHERE a.message = messages.id AND a.event IN ('hand-out', 'pull'));
+CREATE INDEX messages_by_first_handed ON messages (to_container, to_product, to_session, from_container, first_handed_at);
+CREATE INDEX messages_pullable ON messages (to_container, to_product, to_session, created_at) WHERE state IN ('queued', 'delivering');
 `;
 
 const reasonSchema: z.ZodType<Reason> = z.discriminatedUnion("kind", [
@@ -249,20 +260,36 @@ function backfill(db: DatabaseSync): void {
 function migrate(db: DatabaseSync): void {
   const row = z.object({ user_version: z.number() }).parse(db.prepare("PRAGMA user_version").get());
   if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version < 0 || row.user_version > 2) {
+  if (row.user_version < 0 || row.user_version > SCHEMA_VERSION) {
     throw new Error(`the store file has schema version ${row.user_version}; this build reads version ${SCHEMA_VERSION}`);
   }
   inTransaction(db, () => {
     if (row.user_version === 0) db.exec(SCHEMA);
     if (row.user_version < 2) db.exec(CONTROL_LOG);
-    db.exec(BODY_AND_PULL);
-    backfill(db);
+    if (row.user_version < 3) {
+      db.exec(BODY_AND_PULL);
+      backfill(db);
+    }
+    db.exec(INBOX_COST);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   });
 }
 
 const detailOf = (event: Event): Reason | null => (event.kind === "refuse" || event.kind === "retry" ? event.reason : null);
 const encode = (reason: Reason | null): string | null => (reason === null ? null : JSON.stringify(reason));
+
+/** The queries whose cost matters, as text, so a test can ask SQLite which index each one uses. */
+export const SQL = {
+  // What `inbox` can still act on: a queued message, unless its last push ended with no outcome (the adapter may have handed it over, so only the
+  // push path retries it), and a pulled one nobody confirmed since the last parameter. The state test is written out so the partial index applies.
+  pullable: `SELECT m.* FROM messages m WHERE m.to_container = ? AND m.to_product = ? AND m.to_session = ?
+    AND m.state IN ('queued', 'delivering')
+    AND ((m.state = 'queued' AND (m.reason IS NULL OR json_extract(m.reason, '$.kind') != 'no-outcome')) OR (m.state = 'delivering' AND m.pulled = 1 AND m.updated_at <= ?))
+    AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id = m.id) ORDER BY m.created_at, m.rowid`,
+  lastReceived: `SELECT * FROM messages WHERE to_container = ? AND to_product = ? AND to_session = ? AND from_container = ?
+    AND state IN ('delivering', 'delivered') AND first_handed_at >= ? ORDER BY first_handed_at DESC, rowid DESC LIMIT 1`,
+  pulls: "SELECT COUNT(*) AS n FROM audit WHERE message = ? AND event = 'pull'",
+} as const;
 
 /** `path` is a file, or `:memory:` for a store that lives as long as the process. */
 export function openStore(path: string): Store {
@@ -294,17 +321,15 @@ export function openStore(path: string): Store {
   const inboxWhere = `FROM messages m WHERE m.to_container = ? AND m.to_product = ? AND m.to_session = ?
     AND m.state IN ('queued', 'delivering', 'delivered')`;
   const selectInbox = prepare(`SELECT m.* ${inboxWhere} ORDER BY m.created_at, m.rowid`);
-  const selectUnread = prepare(
-    `SELECT m.* ${inboxWhere} AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id = m.id) ORDER BY m.created_at, m.rowid`,
-  );
+  const selectPullable = prepare(SQL.pullable);
   const insertRead = prepare(`INSERT OR IGNORE INTO reads (message_id, read_at)
     SELECT id, ? FROM messages WHERE id = ? AND to_container = ? AND to_product = ? AND to_session = ?`);
   const selectThread = prepare("SELECT * FROM messages WHERE thread = ? ORDER BY created_at, rowid");
   const countSent = prepare(
     "SELECT COUNT(*) AS n FROM messages WHERE from_container = ? AND to_container = ? AND received_at >= ? AND state != 'refused'",
   );
-  const selectLastReceived = prepare(`SELECT * FROM messages WHERE to_container = ? AND to_product = ? AND to_session = ? AND from_container = ?
-    AND state IN ('delivering', 'delivered') AND updated_at >= ? ORDER BY updated_at DESC, rowid DESC LIMIT 1`);
+  const selectLastReceived = prepare(SQL.lastReceived);
+  const markHanded = prepare("UPDATE messages SET first_handed_at = ? WHERE id = ? AND first_handed_at IS NULL");
   const countRefused = prepare("SELECT COUNT(*) AS n FROM messages WHERE from_container = ? AND state = 'refused' AND received_at >= ?");
   const selectNotice = prepare("SELECT 1 AS yes FROM refusal_notices WHERE container = ? AND at > ? LIMIT 1");
   const insertNotice = prepare("INSERT INTO refusal_notices (at, container, refusal_limit, window_ms) VALUES (?, ?, ?, ?)");
@@ -317,7 +342,7 @@ export function openStore(path: string): Store {
     "INSERT INTO control (name, value, at) VALUES ('stopped', ?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value, at = excluded.at",
   );
   const selectAudit = prepare("SELECT * FROM audit WHERE at >= ? ORDER BY id");
-  const countPulls = prepare("SELECT COUNT(*) AS n FROM audit WHERE message = ? AND event = 'pull'");
+  const countPulls = prepare(SQL.pulls);
   const selectApproved = prepare("SELECT 1 AS yes FROM audit WHERE message = ? AND event = 'approve' LIMIT 1");
   const insertControl = prepare("INSERT INTO control_log (at, action) VALUES (?, ?)");
   const selectControl = prepare("SELECT at, action FROM control_log WHERE at >= ? ORDER BY id");
@@ -343,6 +368,7 @@ export function openStore(path: string): Store {
       if (!moved.ok) throw new Error(moved.why);
       const { next } = moved;
       updateMessage.run(next.state, next.attempts, next.pulled ? 1 : 0, next.message.body, encode(next.reason), next.certainty, next.updatedAt, id);
+      if (event.kind === "hand-out" || event.kind === "pull") markHanded.run(at, id);
       audit(next, event.kind, at, detailOf(event));
       return next;
     });
@@ -372,7 +398,8 @@ export function openStore(path: string): Store {
     overdue: (before) => all(selectOverdue, before).map(toTracked),
     held: () => all(selectHeld).map(toTracked),
     expired: (at) => all(selectExpired, at).map(toTracked),
-    inbox: (to, unreadOnly) => all(unreadOnly ? selectUnread : selectInbox, to.container, to.product, to.session).map(toTracked),
+    inbox: (to) => all(selectInbox, to.container, to.product, to.session).map(toTracked),
+    pullable: (to, pulledBefore) => all(selectPullable, to.container, to.product, to.session, pulledBefore).map(toTracked),
 
     markRead: (to, ids, at) =>
       inTransaction(db, () => {
