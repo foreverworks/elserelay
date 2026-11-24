@@ -10,6 +10,7 @@
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
+    "rewriteRelativeImportExtensions": true,
     "declaration": true,
     "outDir": "dist",
     "rootDir": "."

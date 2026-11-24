@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createCodexDriver, connectUnix } from "../src/drivers/codex.js";
+import { openClient } from "../scripts/live/codex.ts";
 import { createConnection } from "../src/drivers/codex/connection.js";
 import { isUnknownThreadMessage, threadListSchema, threadLoadedListSchema } from "../src/drivers/codex/wire.js";
 
@@ -79,5 +80,29 @@ describe.skipIf(bin === undefined)("the real codex app-server", () => {
     expect(await driver.list()).toEqual([]);
     expect(await driver.status(UNKNOWN)).toBeNull();
     expect(await driver.deliver(UNKNOWN, "hello")).toMatchObject({ ok: false, retry: false });
+  });
+
+  it("delivers to a thread that has had no message, then queues behind the turn it started", async () => {
+    // A thread a client just started is idle and not yet persisted, so thread/list does not show it. Without a
+    // login the turn it is given cannot finish, which keeps the thread busy long enough to see the queue.
+    const raw = await openClient({ name: "contract-first", socket, log: join(dir, "raw.jsonl"), mask: (t) => t });
+    const started = await raw.rpc("thread/start", { cwd: dir, sandbox: "read-only", approvalPolicy: "untrusted" });
+    expect(started.ok).toBe(true);
+    const id = String((started.result["thread"] as { id?: string } | undefined)?.id);
+    const driver = createCodexDriver({ connect: connectUnix(socket) });
+    expect(await driver.list()).toEqual([]);
+    expect(await driver.status(id)).toMatchObject({ session: id, activity: "idle" });
+
+    expect(await driver.deliver(id, "first")).toEqual({ ok: true, certainty: "confirmed" });
+    const deadline = Date.now() + 10_000;
+    while ((await driver.status(id))?.activity !== "busy" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await driver.status(id))?.activity).toBe("busy");
+
+    expect(await driver.deliver(id, "second")).toEqual({ ok: true, certainty: "confirmed" });
+    const queued = await raw.rpc("thread/queue/list", { threadId: id });
+    expect(queued.ok && Array.isArray(queued.result["data"]) ? queued.result["data"].length : -1).toBe(1);
+    // Nothing the driver did made the server ask this client for anything.
+    expect(raw.requests).toEqual([]);
+    raw.close();
   });
 });
